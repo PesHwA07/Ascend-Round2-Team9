@@ -4,6 +4,7 @@ import Dashboard from './components/Dashboard.jsx'
 import EventDetail from './components/EventDetail.jsx'
 import FeedbackPanel from './components/FeedbackPanel.jsx'
 import TriageHistory from './components/TriageHistory.jsx'
+import AuditLog from './components/AuditLog.jsx'
 import { useApi } from './hooks/useApi.js'
 import './index.css'
 
@@ -191,6 +192,11 @@ function App() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState(null)
 
+  // Audit trace logs state variables
+  const [auditList, setAuditList] = useState([])
+  const [isAuditLoading, setIsAuditLoading] = useState(false)
+  const [auditError, setAuditError] = useState(null)
+
   const api = useApi();
 
   // Unified data load fetch controller
@@ -234,7 +240,6 @@ function App() {
     try {
       if (connectionStatus === 'online') {
         const response = await api.getHistory();
-        // Handle various list wrappers returned by different DB models
         const list = response.history || response.snapshots || (Array.isArray(response) ? response : []);
         setHistoryList(list);
       } else {
@@ -272,6 +277,77 @@ function App() {
       loadHistory();
     }
   }, [activeTab, loadHistory]);
+
+  // Fetch execution traces when active view shifts to audit logs
+  const loadAuditLogs = useCallback(async () => {
+    setIsAuditLoading(true);
+    setAuditError(null);
+    try {
+      if (connectionStatus === 'online') {
+        const response = await api.getAuditLog();
+        const list = response.logs || (Array.isArray(response) ? response : []);
+        setAuditList(list);
+      } else {
+        // Fallback trace events for local Sandbox demo runs
+        setAuditList([
+          {
+            id: 1,
+            timestamp: "2026-08-23T10:30:00Z",
+            level: "info",
+            step: "triage",
+            action: "TRIAGE_PIPELINE_RUN",
+            actor: "system-scheduler",
+            message: "Completed automated triage run snapshot 7320b982-f8c6-4b0d-95cf-06f128c7724a.",
+            duration_ms: 182.5,
+            execution_time_ms: 182.5
+          },
+          {
+            id: 2,
+            timestamp: "2026-08-23T10:29:58Z",
+            level: "info",
+            step: "ingest",
+            action: "TELEMETRY_INGESTION",
+            actor: "infra-agent-us-east",
+            message: "Ingested 42 telemetry events into the raw storage buffer.",
+            duration_ms: 320.0,
+            execution_time_ms: 320.0
+          },
+          {
+            id: 3,
+            timestamp: "2026-08-23T10:20:00Z",
+            level: "info",
+            step: "explain",
+            action: "LLM_EXPLANATION_GEN",
+            actor: "ollama-explainer",
+            message: "Ollama Llama3.2 generation successful for critical incident evt-001.",
+            duration_ms: 4850.0,
+            execution_time_ms: 4850.0
+          },
+          {
+            id: 4,
+            timestamp: "2026-08-23T10:15:30Z",
+            level: "error",
+            step: "explain",
+            action: "LLM_EXPLANATION_TIMEOUT",
+            actor: "ollama-explainer",
+            message: "Ollama Llama3.2 socket read timeout after 5000ms. Template fallback activated.",
+            duration_ms: 5020.0,
+            execution_time_ms: 5020.0
+          }
+        ]);
+      }
+    } catch (err) {
+      setAuditError(err.message || 'Failed to retrieve diagnostic traces.');
+    } finally {
+      setIsAuditLoading(false);
+    }
+  }, [api, connectionStatus]);
+
+  useEffect(() => {
+    if (activeTab === 'audit') {
+      loadAuditLogs();
+    }
+  }, [activeTab, loadAuditLogs]);
 
   // Periodic heartbeat monitor checking API connectivity every 10 seconds
   useEffect(() => {
@@ -474,29 +550,12 @@ function App() {
       )}
 
       {activeTab === 'audit' && (
-        <main className="placeholder-container">
-          <div className="placeholder-badge">
-            <span className="dot red" aria-hidden="true"></span>
-            <span>Audit logs console</span>
-          </div>
-          <h1 className="placeholder-title">Latency Diagnostics</h1>
-          <p className="placeholder-description">
-            Pipeline trace telemetry. Renders step executions and SLA checkpoints in milliseconds.
-          </p>
-          <div className="system-status-terminal glass-panel">
-            <div className="terminal-header">
-              <span className="terminal-title">triage_latency_tracker.sys</span>
-            </div>
-            <div className="terminal-line">
-              <span className="terminal-prompt">&gt;</span>
-              <span>latency logging stream: <span className="terminal-value-success">STANDBY</span></span>
-            </div>
-            <div className="terminal-line">
-              <span className="terminal-prompt">&gt;</span>
-              <span>SLA alert bounds: <span className="terminal-value-info">5000ms SLA TARGET</span></span>
-            </div>
-          </div>
-        </main>
+        <AuditLog
+          auditLogs={auditList}
+          isLoading={isAuditLoading}
+          error={auditError}
+          onRefresh={loadAuditLogs}
+        />
       )}
 
       {/* Slide-out Drawer / Bottom sheet Overlay */}

@@ -1743,4 +1743,28 @@ input:focus-visible {
   }
 }
 
+/* ==========================================
+   AUDIT LOG TERMINAL TELEMETRY (STEP 7)
+   ========================================== */
+
+.terminal-body::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.terminal-body::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.terminal-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+.terminal-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 0 5px rgba(99, 102, 241, 0.5);
+}
+
+
 
