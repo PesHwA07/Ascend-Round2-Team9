@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import Header from './components/Header.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import EventDetail from './components/EventDetail.jsx'
+import FeedbackPanel from './components/FeedbackPanel.jsx'
 import { useApi } from './hooks/useApi.js'
 import './index.css'
 
@@ -262,7 +263,7 @@ function App() {
     loadData();
   }
 
-  // Expose feedback updates handler (used by FeedbackPanel in future steps)
+  // Expose feedback updates handler (used by FeedbackPanel)
   const handleUpdateWeights = async (newWeights) => {
     setIsLoading(true);
     try {
@@ -275,19 +276,55 @@ function App() {
       } else {
         // Fallback weights updates simulator in DEMO MODE
         console.log('Feedback weights submitted in local DEMO MODE:', newWeights);
+        
+        // Find selected event index to preserve if possible
+        const prevSelectedId = selectedEvent?.event_id || selectedEvent?.id;
+
+        // Perform mock local recalculation
         setActiveWeights(newWeights);
-        setTriageData((prev) => ({
+        
+        const updatedEvents = MOCK_TRIAGE_DATA.ranked_events.map(e => {
+          const sevScore = e.severity === 'critical' ? 1.0 : e.severity === 'warning' ? 0.6 : 0.2;
+          const freqScore = e.source === 'infra-monitor' ? 0.8 : 0.5;
+          const recScore = e.id === 1 ? 0.95 : e.id === 2 ? 0.8 : 0.4;
+          const anomScore = e.id === 2 ? 0.9 : 0.4;
+          const impactScore = e.service === 'payment-api' ? 1.0 : e.service === 'gateway' ? 0.8 : 0.5;
+          
+          const rawScore = 
+            (newWeights.severity * sevScore) + 
+            (newWeights.frequency * freqScore) + 
+            (newWeights.recency * recScore) + 
+            (newWeights.anomaly * anomScore) + 
+            (newWeights.business_impact * impactScore);
+
+          return {
+            ...e,
+            score: parseFloat(rawScore.toFixed(2)),
+            priority_score: parseFloat(rawScore.toFixed(2))
+          };
+        }).sort((a, b) => b.score - a.score).map((e, idx) => ({
+          ...e,
+          rank: idx + 1
+        }));
+
+        setTriageData(prev => ({
           ...prev,
           weights_used: newWeights,
           weights_applied: newWeights,
-          ranked_events: prev.ranked_events.map(e => ({
-            ...e,
-            score: (newWeights.severity * 0.3) + (newWeights.frequency * 0.2) + (newWeights.recency * 0.15) + (newWeights.anomaly * 0.2) + (newWeights.business_impact * 0.15)
-          })).sort((a, b) => b.score - a.score)
+          ranked_events: updatedEvents
         }));
+
+        // Preserve selected event details if active
+        if (prevSelectedId) {
+          const freshSelect = updatedEvents.find(e => (e.event_id || e.id) === prevSelectedId);
+          if (freshSelect) {
+            setSelectedEvent(freshSelect);
+          }
+        }
       }
     } catch (err) {
       console.error('Failed to submit active scoring weights:', err.message);
+      throw err; // Re-throw so FeedbackPanel knows to render the error banner
     } finally {
       setIsLoading(false);
     }
@@ -307,14 +344,21 @@ function App() {
 
       {/* Primary Panels Switcher Router */}
       {activeTab === 'brief' && (
-        <Dashboard
-          triageData={triageData}
-          onSelectEvent={handleSelectEvent}
-          isLoading={isLoading}
-          isOnline={connectionStatus === 'online'}
-          isReplayMode={isReplayMode}
-          onExitReplay={handleExitReplay}
-        />
+        <div className="briefing-workspace-layout">
+          <FeedbackPanel
+            currentWeights={activeWeights}
+            onUpdateWeights={handleUpdateWeights}
+            isLoading={isLoading}
+          />
+          <Dashboard
+            triageData={triageData}
+            onSelectEvent={handleSelectEvent}
+            isLoading={isLoading}
+            isOnline={connectionStatus === 'online'}
+            isReplayMode={isReplayMode}
+            onExitReplay={handleExitReplay}
+          />
+        </div>
       )}
 
       {activeTab === 'history' && (
