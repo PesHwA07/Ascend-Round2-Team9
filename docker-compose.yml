@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  # --- FastAPI Backend (port 8000) ---
+  # Serves the REST API, ranking engine, and connects to SQLite
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app        # Live code reload in dev
+      - ./data:/app/data      # SQLite file persists here
+    environment:
+      - DATABASE_URL=sqlite:///./data/aurabrief.db
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # --- React Frontend (port 5173) ---
+  # Vite dev server with proxy to backend for /api/* routes
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app       # Live code reload (HMR)
+      - /app/node_modules     # Preserve container's node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # --- Event Simulator (no exposed port) ---
+  # Generates and sends simulated events to backend API
+  simulator:
+    build: ./simulator
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - API_URL=http://backend:8000
+      - STREAM_INTERVAL=${STREAM_INTERVAL:-5}
+    volumes:
+      - ./simulator:/app      # Live code reload
+    restart: unless-stopped
