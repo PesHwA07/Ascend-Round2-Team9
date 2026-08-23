@@ -444,11 +444,22 @@ function App() {
   const handleUpdateWeights = async (newWeights) => {
     setIsLoading(true);
     try {
+      const prevSelectedId = selectedEvent?.event_id || selectedEvent?.id;
       if (connectionStatus === 'online') {
         const response = await api.postFeedback(newWeights);
         if (response && response.triage) {
           setTriageData(response.triage);
           setActiveWeights(newWeights);
+          
+          // Preserve selected event details on re-ranking in live mode
+          if (prevSelectedId && response.triage.ranked_events) {
+            const freshSelect = response.triage.ranked_events.find(e => (e.event_id || e.id) === prevSelectedId);
+            if (freshSelect) {
+              setSelectedEvent(freshSelect);
+            } else {
+              setSelectedEvent(null);
+            }
+          }
         }
       } else {
         // Fallback weights updates simulator in DEMO MODE

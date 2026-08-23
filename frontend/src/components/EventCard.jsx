@@ -15,6 +15,18 @@ function EventCard({ event, onSelect }) {
     suggested_action = '',
   } = event
 
+  // Safely parse structured vs flat explanations to avoid JSX object rendering crashes
+  let briefText = ''
+  let actionText = ''
+
+  if (typeof explanation === 'object' && explanation !== null) {
+    briefText = explanation.summary || ''
+    actionText = explanation.recommended_action || suggested_action || ''
+  } else {
+    briefText = explanation || ''
+    actionText = suggested_action || ''
+  }
+
   // Format score as percentage (e.g. 0.92 -> 92)
   const scorePercent = Math.round(score * 100)
   
@@ -73,15 +85,15 @@ function EventCard({ event, onSelect }) {
 
         <h3 className="event-card-title">{title}</h3>
         
-        {explanation && (
+        {briefText && (
           <p className="event-card-excerpt">
-            <span className="excerpt-label">AI Brief:</span> {explanation}
+            <span className="excerpt-label">AI Brief:</span> {briefText}
           </p>
         )}
 
-        {suggested_action && (
+        {actionText && (
           <div className="event-card-action-preview">
-            <span className="action-label">Action:</span> {suggested_action}
+            <span className="action-label">Action:</span> {actionText}
           </div>
         )}
       </div>
