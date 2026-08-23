@@ -4,6 +4,14 @@
 
 AuraBrief 95 ingests simulated event streams from infrastructure, applications, and deployment pipelines, applies intelligent weighted scoring to rank incidents by priority, generates natural-language explanations using LLM, and surfaces results through a responsive operator console.
 
+### Dashboard & Briefing
+![Dashboard](./docs/assets/dashboard.png)
+
+### Execution Trace Logs
+![Audit Logs](./docs/assets/audit-logs.png)
+
+### Historical Archives (Replay Mode)
+![History Archives](./docs/assets/history.png)
 ---
 
 ## Table of Contents
@@ -131,7 +139,7 @@ All configuration is via environment variables in `.env`:
 |----------|---------|-------------|
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama server URL (teammate's laptop IP) |
 | `OLLAMA_MODEL` | `llama3` | LLM model name for generating explanations |
-| `STREAM_INTERVAL` | `5` | Seconds between simulator event batches |
+| `STREAM_INTERVAL` | `20` | Seconds between simulator event batches |
 | `DATABASE_URL` | `sqlite:///./data/aurabrief.db` | SQLite database path |
 
 ### Ollama Setup
