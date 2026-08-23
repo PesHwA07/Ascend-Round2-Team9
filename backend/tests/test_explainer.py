@@ -186,7 +186,29 @@ async def test_request_body_uses_json_mode_and_no_think(monkeypatch):
     assert body["stream"] is False
     assert "AIOps operations assistant" in body["prompt"]
     assert "Rank: #1" in body["prompt"]
-    assert "host.docker.internal" not in captured.get("url", "")
+
+
+async def test_ollama_host_env_var_is_honoured(monkeypatch):
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"response": VALID_LLM_TEXT})
+
+    patch_ollama_client(monkeypatch, handler)
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:9999")
+
+    await explainer.generate_explanation(make_event(), make_ranking())
+
+    assert captured["url"] == "http://127.0.0.1:9999/api/generate"
+
+
+def test_docker_bridge_placeholder_falls_back_to_localhost(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://host.docker.internal:11434")
+
+    # Backend settings are absent in this standalone context; env placeholder
+    # must be skipped so local runs hit localhost.
+    assert explainer._base_url() == "http://localhost:11434"
 
 
 async def test_prompt_contains_actual_five_signal_breakdown():

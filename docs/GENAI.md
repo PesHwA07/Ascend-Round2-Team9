@@ -56,7 +56,7 @@ package is present, values may alternatively live in `backend/app/config.py`
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_ENABLED` | `true` | Master switch. `false` = template fallback only |
-| `OLLAMA_BASE_URL` / `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint. `OLLAMA_HOST` matches the backend config; its Docker-bridge default (`host.docker.internal`) is ignored when running outside Docker |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint (backend config convention). The backend's Docker-bridge default (`host.docker.internal`) is ignored when running outside Docker |
 | `OLLAMA_MODEL` | `llama3.2:3b` | Model tag (anything in `ollama list`) |
 | `OLLAMA_TIMEOUT` | `6.0` | Hard per-request timeout (seconds) |
 | `OLLAMA_NUM_PREDICT` | `150` | Max tokens generated per explanation |

@@ -61,7 +61,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 _DEFAULTS = {
     "OLLAMA_ENABLED": "true",
-    "OLLAMA_BASE_URL": "http://localhost:11434",
+    "OLLAMA_HOST": "http://localhost:11434",
     "OLLAMA_MODEL": "llama3.2:3b",
     "OLLAMA_TIMEOUT": "6.0",
     "OLLAMA_NUM_PREDICT": "150",
@@ -72,7 +72,7 @@ _DEFAULTS = {
 def _setting(name: str) -> str:
     """Resolve a Gen-AI setting: backend Settings -> env var -> default.
 
-    Honours the backend's ``OLLAMA_HOST`` naming as well as ``OLLAMA_BASE_URL``.
+    Uses M5's ``OLLAMA_HOST`` convention.
     """
     try:
         from backend.app.config import settings  # teammate-owned config
@@ -86,20 +86,22 @@ def _setting(name: str) -> str:
 
 
 def _base_url() -> str:
-    """Ollama endpoint, tolerating the backend's Docker-oriented OLLAMA_HOST."""
-    candidates = [os.getenv("OLLAMA_BASE_URL"), os.getenv("OLLAMA_HOST")]
+    """Ollama endpoint via OLLAMA_HOST (backend convention).
+
+    The backend's Docker-bridge default (``host.docker.internal``) is skipped
+    when this module runs outside Docker; localhost is used instead.
+    """
+    candidates = [os.getenv("OLLAMA_HOST")]
     try:
         from backend.app.config import settings  # teammate-owned config
 
         candidates.append(getattr(settings, "OLLAMA_HOST", None))
-        candidates.append(getattr(settings, "OLLAMA_BASE_URL", None))
     except Exception:
         pass
     for candidate in candidates:
-        # Skip the Docker-bridge default; this module may run outside Docker.
         if candidate and "host.docker.internal" not in str(candidate):
             return str(candidate).rstrip("/")
-    return _DEFAULTS["OLLAMA_BASE_URL"]
+    return _DEFAULTS["OLLAMA_HOST"]
 
 
 def _as_bool(value: Any) -> bool:
