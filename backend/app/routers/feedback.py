@@ -13,14 +13,16 @@ router = APIRouter(prefix="/api", tags=["Feedback & Weights"])
 @router.get("/weights", response_model=WeightResponse)
 def get_weights(db: Session = Depends(get_db)):
     """
-    Get the currently active ranking weights.
+    Get the currently active 5-signal ranking weights.
     """
     weights = get_current_weights(db)
     return WeightResponse(
-        severity_weight=weights["severity_weight"],
-        blast_radius_weight=weights["blast_radius_weight"],
-        anomaly_weight=weights["anomaly_weight"],
-        recurrence_weight=weights["recurrence_weight"],
+        weights=weights,
+        severity=weights["severity"],
+        frequency=weights["frequency"],
+        recency=weights["recency"],
+        anomaly=weights["anomaly"],
+        business_impact=weights["business_impact"],
         updated_at=datetime.now(timezone.utc),
         updated_by="system"
     )
@@ -29,24 +31,39 @@ def get_weights(db: Session = Depends(get_db)):
 async def submit_operator_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
     """
     Adjust ranking weights via operator feedback loop (Bonus Scope).
-    Optionally triggers immediate re-triage of current events.
+    Immediately returns re-ranked events matching Frontend PRD requirement.
     """
     start_time = time.perf_counter()
     try:
+        previous_weights = get_current_weights(db)
+        
         updated_config = update_weights(
             db=db,
-            severity_weight=request.severity_weight,
-            blast_radius_weight=request.blast_radius_weight,
-            anomaly_weight=request.anomaly_weight,
-            recurrence_weight=request.recurrence_weight,
+            severity=request.severity,
+            frequency=request.frequency,
+            recency=request.recency,
+            anomaly=request.anomaly,
+            business_impact=request.business_impact,
             actor="operator"
         )
         
+        new_weights = {
+            "severity": updated_config.severity,
+            "frequency": updated_config.frequency,
+            "recency": updated_config.recency,
+            "anomaly": updated_config.anomaly,
+            "business_impact": updated_config.business_impact
+        }
+        
+        ranked_events_response = None
         new_snapshot_id = None
+        
         if request.re_triage_now:
-            from backend.app.routers.triage import execute_triage_pipeline
+            from backend.app.routers.triage import execute_triage_pipeline, _build_triage_current_response
             new_snapshot = await execute_triage_pipeline(db)
             new_snapshot_id = new_snapshot.id
+            curr_resp = _build_triage_current_response(new_snapshot)
+            ranked_events_response = curr_resp.ranked_events
             
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         
@@ -54,15 +71,14 @@ async def submit_operator_feedback(request: FeedbackRequest, db: Session = Depen
         log_audit(
             db=db,
             action="UPDATE_WEIGHTS",
+            step="feedback",
+            level="info",
             actor="operator",
+            message="Operator adjusted ranking weights and triggered re-triage.",
             details={
                 "notes": request.operator_notes,
-                "weights": {
-                    "severity": updated_config.severity_weight,
-                    "blast_radius": updated_config.blast_radius_weight,
-                    "anomaly": updated_config.anomaly_weight,
-                    "recurrence": updated_config.recurrence_weight
-                },
+                "previous_weights": previous_weights,
+                "new_weights": new_weights,
                 "triggered_re_triage": request.re_triage_now,
                 "new_snapshot_id": new_snapshot_id
             },
@@ -70,17 +86,13 @@ async def submit_operator_feedback(request: FeedbackRequest, db: Session = Depen
         )
 
         return FeedbackResponse(
-            status="success",
-            message="Ranking weights updated successfully.",
-            weights=WeightResponse(
-                severity_weight=updated_config.severity_weight,
-                blast_radius_weight=updated_config.blast_radius_weight,
-                anomaly_weight=updated_config.anomaly_weight,
-                recurrence_weight=updated_config.recurrence_weight,
-                updated_at=updated_config.updated_at,
-                updated_by=updated_config.updated_by
-            ),
-            new_snapshot_id=new_snapshot_id
+            status="weights_updated",
+            previous_weights=previous_weights,
+            new_weights=new_weights,
+            weights=new_weights,
+            message="Rankings will reflect new weights on next triage refresh.",
+            new_snapshot_id=new_snapshot_id,
+            ranked_events=ranked_events_response
         )
 
     except Exception as e:

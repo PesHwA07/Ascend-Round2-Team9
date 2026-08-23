@@ -42,6 +42,7 @@ app.include_router(audit.router)
 def health_check(db: Session = Depends(get_db)):
     """
     Health check endpoint verifying API service and database connectivity.
+    Matches API_SCHEMA.md and FRONTEND_PRD.md.
     """
     db_status = "connected"
     try:
@@ -50,7 +51,8 @@ def health_check(db: Session = Depends(get_db)):
         db_status = f"error: {str(e)}"
 
     return HealthResponse(
-        status="healthy" if db_status == "connected" else "unhealthy",
+        status="ok" if db_status == "connected" else "degraded",
+        service="aurabrief-backend",
         app_name=settings.APP_NAME,
         version=settings.APP_VERSION,
         database=db_status,

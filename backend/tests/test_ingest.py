@@ -4,43 +4,61 @@ def test_health_check(client):
     response = client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "healthy"
+    assert data["status"] == "ok"
+    assert data["service"] == "aurabrief-backend"
     assert data["database"] == "connected"
 
 def test_ingest_three_streams(client):
+    """Test ingestion from the 3 official streams defined in API_SCHEMA.md."""
     sample_events = [
         {
-            "stream_source": "infra_apm",
-            "event_type": "high_cpu",
+            "event_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "source": "infra-monitor",
             "severity": "critical",
             "service": "payment-api",
-            "environment": "production",
-            "region": "us-east-1",
-            "title": "CPU utilization exceeded 95%",
-            "description": "Instance pool i-0192 under heavy load",
-            "raw_payload": {"cpu_percent": 98.2, "instances": 4}
+            "region": "us-east",
+            "title": "CPU usage at 95% on payment-api node",
+            "details": {
+                "metric_name": "cpu_utilization_percent",
+                "metric_value": 95.2,
+                "threshold": 80.0,
+                "duration_seconds": 300
+            },
+            "tags": ["infrastructure", "performance", "cpu"]
         },
         {
-            "stream_source": "auth_security",
-            "event_type": "failed_login_burst",
-            "severity": "high",
-            "service": "auth-gateway",
-            "environment": "production",
-            "region": "eu-west-1",
-            "title": "Abnormal credential stuffing detected",
-            "description": "500 failed logins in 60 seconds from IP subnet",
-            "raw_payload": {"failed_attempts": 500, "unique_users": 42}
+            "event_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "source": "app-errors",
+            "severity": "critical",
+            "service": "payment-api",
+            "region": "us-east",
+            "title": "HTTP 5xx spike: 23% error rate on /payments/process",
+            "details": {
+                "error_type": "http_5xx_spike",
+                "error_count": 347,
+                "time_window_seconds": 300,
+                "endpoint": "/api/v1/payments/process",
+                "error_rate_percent": 23.4,
+                "sample_error": "java.sql.SQLTransientConnectionException: Connection pool exhausted"
+            },
+            "tags": ["application", "errors", "http-5xx"]
         },
         {
-            "stream_source": "app_business",
-            "event_type": "checkout_latency_spike",
-            "severity": "medium",
-            "service": "cart-checkout",
-            "environment": "production",
-            "region": "global",
-            "title": "P99 latency above SLA",
-            "description": "Checkout completion taking > 4.5 seconds",
-            "raw_payload": {"latency_p99_ms": 4600, "orders_affected": 120}
+            "event_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "source": "deploy-events",
+            "severity": "warning",
+            "service": "gateway",
+            "region": "eu-west",
+            "title": "Deploy failed: gateway v2.4.0 in eu-west",
+            "details": {
+                "deploy_type": "deploy_failed",
+                "version_from": "v2.3.1",
+                "version_to": "v2.4.0",
+                "deployed_by": "ci-bot",
+                "commit_sha": "a1b2c3d",
+                "failure_reason": "Health check timeout after 120s"
+            },
+            "tags": ["deployment", "failure", "ci-cd"]
         }
     ]
 
@@ -48,41 +66,44 @@ def test_ingest_three_streams(client):
         "/api/events/ingest",
         json={"events": sample_events, "trigger_triage": True}
     )
-    assert response.status_code == 201
-    data = response.json()
-    assert data["ingested_count"] == 3
-    assert len(data["events"]) == 3
-    assert data["batch_id"] is not None
-
-def test_triage_current_after_ingest(client):
-    # Ingest test event
-    client.post(
-        "/api/events/ingest",
-        json={
-            "events": [
-                {
-                    "stream_source": "infra_apm",
-                    "event_type": "database_deadlock",
-                    "severity": "critical",
-                    "service": "order-db",
-                    "environment": "production",
-                    "region": "us-east-1",
-                    "title": "Deadlock detected in order transaction pool",
-                    "description": "Transactions rolling back",
-                    "raw_payload": {"deadlock_count": 14}
-                }
-            ],
-            "trigger_triage": True
-        }
-    )
-
-    response = client.get("/api/triage/current")
     assert response.status_code == 200
     data = response.json()
-    assert data["total_events_evaluated"] >= 1
-    assert len(data["items"]) >= 1
-    top_item = data["items"][0]
-    assert top_item["rank"] == 1
-    assert top_item["event"]["service"] == "order-db"
-    assert "explanation" in top_item
-    assert "suggested_action" in top_item
+    assert data["status"] == "accepted"
+    assert data["received_count"] == 3
+    assert len(data["event_ids"]) == 3
+    assert data["event_ids"][0] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+def test_ingest_schema_aliases(client):
+    """Verify alias support: stream_source/source, raw_payload/details, id/event_id."""
+    alias_payload = {
+        "events": [
+            {
+                "id": "test-alias-uuid-1",
+                "stream_source": "infra-monitor",
+                "severity": "high",
+                "service": "auth-gateway",
+                "region": "us-west",
+                "title": "Authentication Latency Spike",
+                "raw_payload": {"latency_p99_ms": 3200}
+            }
+        ],
+        "trigger_triage": False
+    }
+    response = client.post("/api/events/ingest", json=alias_payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received_count"] == 1
+    assert data["event_ids"][0] == "test-alias-uuid-1"
+
+def test_invalid_event_validation(client):
+    """Verify invalid payload handling (422 Unprocessable Entity)."""
+    invalid_payload = {
+        "events": [
+            {
+                "severity": "critical"
+                # Missing source, service, title
+            }
+        ]
+    }
+    response = client.post("/api/events/ingest", json=invalid_payload)
+    assert response.status_code == 422

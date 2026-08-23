@@ -11,11 +11,11 @@ from backend.app.services.audit_logger import log_audit
 
 router = APIRouter(prefix="/api/events", tags=["Ingest"])
 
-@router.post("/ingest", response_model=EventIngestResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/ingest", response_model=EventIngestResponse, status_code=status.HTTP_200_OK)
 async def ingest_events(request: EventIngestRequest, db: Session = Depends(get_db)):
     """
-    Ingest a batch of simulated events from any of the 3 event streams (APM, Security, Business).
-    Optionally triggers immediate triage update.
+    Ingest a batch of simulated events from any of the 3 event streams (infra-monitor, app-errors, deploy-events).
+    Accepts simulator batches and triggers immediate triage update.
     """
     start_time = time.perf_counter()
     batch_id = str(uuid.uuid4())
@@ -25,24 +25,26 @@ async def ingest_events(request: EventIngestRequest, db: Session = Depends(get_d
         for event_data in request.events:
             event_dict = event_data.model_dump()
             
-            # Ensure UUID and Timestamp
-            if not event_dict.get("id"):
-                event_dict["id"] = str(uuid.uuid4())
-            if not event_dict.get("timestamp"):
-                event_dict["timestamp"] = datetime.now(timezone.utc)
-                
+            # Resolve event_id and timestamp
+            event_id = event_dict.get("event_id") or event_dict.get("id") or str(uuid.uuid4())
+            ts = event_dict.get("timestamp") or datetime.now(timezone.utc)
+            source = event_dict.get("source") or event_dict.get("stream_source") or "general"
+            details = event_dict.get("details") or event_dict.get("raw_payload") or {}
+            tags = event_dict.get("tags") or []
+            
             event_obj = Event(
-                id=event_dict["id"],
-                stream_source=event_dict["stream_source"],
-                timestamp=event_dict["timestamp"],
-                event_type=event_dict["event_type"],
+                id=event_id,
+                source=source,
+                timestamp=ts,
+                event_type=event_dict.get("event_type") or "general_event",
                 severity=event_dict.get("severity", "medium").lower(),
                 service=event_dict["service"],
                 environment=event_dict.get("environment", "production"),
                 region=event_dict.get("region", "global"),
                 title=event_dict["title"],
                 description=event_dict.get("description", ""),
-                raw_payload=event_dict.get("raw_payload", {}),
+                details=details,
+                tags=tags,
                 ingested_at=datetime.now(timezone.utc)
             )
             db.add(event_obj)
@@ -59,20 +61,28 @@ async def ingest_events(request: EventIngestRequest, db: Session = Depends(get_d
             from backend.app.routers.triage import execute_triage_pipeline
             await execute_triage_pipeline(db, batch_id=batch_id)
 
-        # Audit log the ingestion
+        # Audit log the ingestion step
         log_audit(
             db=db,
             action="INGEST_EVENTS",
-            actor="stream_runner",
+            step="ingest",
+            level="info",
+            actor="simulator",
+            message=f"Received and ingested {len(saved_events)} events from streams.",
             details={
                 "batch_id": batch_id,
                 "count": len(saved_events),
-                "sources": list(set(e.stream_source for e in saved_events))
+                "sources": list(set(e.source for e in saved_events))
             },
             execution_time_ms=elapsed_ms
         )
 
+        event_ids = [e.id for e in saved_events]
+
         return EventIngestResponse(
+            status="accepted",
+            received_count=len(saved_events),
+            event_ids=event_ids,
             ingested_count=len(saved_events),
             batch_id=batch_id,
             message=f"Successfully ingested {len(saved_events)} events across streams.",

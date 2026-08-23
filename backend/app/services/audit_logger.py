@@ -10,7 +10,10 @@ logger = logging.getLogger("aurabrief.audit")
 def log_audit(
     db: Session,
     action: str,
+    step: str = "ingest",
+    level: str = "info",
     actor: str = "system",
+    message: str = "",
     details: Optional[Dict[str, Any]] = None,
     execution_time_ms: float = 0.0
 ) -> AuditLog:
@@ -18,16 +21,22 @@ def log_audit(
     if details is None:
         details = {}
         
+    if not message:
+        message = f"Executed {action} step [{step}] by {actor}"
+
     entry = AuditLog(
         timestamp=datetime.now(timezone.utc),
+        level=level,
+        step=step,
         action=action,
         actor=actor,
+        message=message,
         details=details,
-        execution_time_ms=execution_time_ms
+        execution_time_ms=round(execution_time_ms, 2)
     )
     db.add(entry)
     db.commit()
     db.refresh(entry)
     
-    logger.info(f"AUDIT [{action}] by [{actor}] ({execution_time_ms:.2f}ms): {details}")
+    logger.info(f"AUDIT [{level.upper()}] [{step}] [{action}] by [{actor}] ({execution_time_ms:.2f}ms): {message}")
     return entry

@@ -15,19 +15,32 @@ class Event(Base):
     __tablename__ = "events"
 
     id = Column(String(64), primary_key=True, default=generate_uuid, index=True)
-    stream_source = Column(String(64), nullable=False, index=True)  # infra_apm, auth_security, app_business
+    source = Column(String(64), nullable=False, index=True)  # infra-monitor, app-errors, deploy-events
     timestamp = Column(DateTime, default=utc_now, index=True)
-    event_type = Column(String(128), nullable=False, index=True)
-    severity = Column(String(32), nullable=False, default="medium", index=True) # critical, high, medium, low, info
+    event_type = Column(String(128), default="general_event", index=True)
+    severity = Column(String(32), nullable=False, default="medium", index=True) # critical, warning, high, medium, low, info
     service = Column(String(128), nullable=False, index=True)
     environment = Column(String(32), default="production")
-    region = Column(String(32), default="global")
+    region = Column(String(64), default="global")
     title = Column(String(256), nullable=False)
     description = Column(Text, default="")
-    raw_payload = Column(JSON, default=dict)
+    details = Column(JSON, default=dict)
+    tags = Column(JSON, default=list)
     ingested_at = Column(DateTime, default=utc_now, index=True)
 
     triage_items = relationship("TriageItem", back_populates="event", cascade="all, delete-orphan")
+
+    @property
+    def event_id(self) -> str:
+        return self.id
+
+    @property
+    def stream_source(self) -> str:
+        return self.source
+
+    @property
+    def raw_payload(self) -> dict:
+        return self.details or {}
 
 
 class TriageSnapshot(Base):
@@ -54,18 +67,20 @@ class TriageItem(Base):
     rank = Column(Integer, nullable=False, index=True)
     priority_score = Column(Float, nullable=False)
     
-    # Component breakdown scores (0.0 - 1.0 or 0 - 100)
-    severity_score = Column(Float, default=0.0)
-    blast_radius_score = Column(Float, default=0.0)
-    anomaly_score = Column(Float, default=0.0)
-    recurrence_score = Column(Float, default=0.0)
+    # 5-Signal component breakdown scores (0.0 - 1.0)
+    score_breakdown = Column(JSON, default=dict)
     
     explanation = Column(Text, default="")
+    explanation_type = Column(String(32), default="template") # 'ai' | 'template'
     suggested_action = Column(Text, default="")
     status = Column(String(32), default="open") # open, acknowledged, resolved
 
     snapshot = relationship("TriageSnapshot", back_populates="items")
     event = relationship("Event", back_populates="triage_items")
+
+    @property
+    def score(self) -> float:
+        return self.priority_score
 
 
 class WeightConfig(Base):
@@ -73,10 +88,11 @@ class WeightConfig(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
-    severity_weight = Column(Float, nullable=False)
-    blast_radius_weight = Column(Float, nullable=False)
-    anomaly_weight = Column(Float, nullable=False)
-    recurrence_weight = Column(Float, nullable=False)
+    severity = Column(Float, nullable=False, default=0.30)
+    frequency = Column(Float, nullable=False, default=0.20)
+    recency = Column(Float, nullable=False, default=0.15)
+    anomaly = Column(Float, nullable=False, default=0.20)
+    business_impact = Column(Float, nullable=False, default=0.15)
     updated_by = Column(String(64), default="operator")
 
 
@@ -85,7 +101,14 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime, default=utc_now, index=True)
-    action = Column(String(64), nullable=False, index=True)
+    level = Column(String(32), default="info") # info, warning, error
+    step = Column(String(64), default="ingest") # ingest, ranking, explainer, feedback, system
+    action = Column(String(64), nullable=False, index=True) # INGEST_EVENTS, RUN_TRIAGE, UPDATE_WEIGHTS
     actor = Column(String(64), default="system")
+    message = Column(Text, default="")
     details = Column(JSON, default=dict)
     execution_time_ms = Column(Float, default=0.0)
+
+    @property
+    def duration_ms(self) -> float:
+        return self.execution_time_ms
