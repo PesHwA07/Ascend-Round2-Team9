@@ -8,8 +8,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app        # Live code reload in dev
-      - ./data:/app/data      # SQLite file persists here
+      - ./backend:/code/backend   # Live code reload (matches M5's import paths)
+      - ./data:/code/data         # SQLite file persists here
     environment:
       - DATABASE_URL=sqlite:///./data/aurabrief.db
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
