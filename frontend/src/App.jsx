@@ -226,7 +226,7 @@ function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [api]);
+  }, [api.getHealth, api.getCurrentTriage]);
 
   // Load telemetry data on boot
   useEffect(() => {
@@ -270,7 +270,7 @@ function App() {
     } finally {
       setIsHistoryLoading(false);
     }
-  }, [api, connectionStatus]);
+  }, [api.getHistory, connectionStatus]);
 
   useEffect(() => {
     if (activeTab === 'history') {
@@ -341,7 +341,7 @@ function App() {
     } finally {
       setIsAuditLoading(false);
     }
-  }, [api, connectionStatus]);
+  }, [api.getAuditLog, connectionStatus]);
 
   useEffect(() => {
     if (activeTab === 'audit') {
@@ -377,7 +377,7 @@ function App() {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [api]);
+  }, [api.getHealth, api.getCurrentTriage]);
 
   // Event selection callback handler
   const handleSelectEvent = (event) => {
