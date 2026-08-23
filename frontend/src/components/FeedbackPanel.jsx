@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 
-function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading }) {
+function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading, disabled }) {
   // Local state to track sliders in integer percent (0 to 100)
   const [tempWeights, setTempWeights] = useState({
     severity: 30,
@@ -51,7 +51,7 @@ function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading }) {
   // Handle weight application POST request
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!isBudgetBalanced) return;
+    if (!isBudgetBalanced || disabled) return;
 
     setSubmitError('');
     setSubmitSuccess(false);
@@ -79,9 +79,15 @@ function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading }) {
     <div className="feedback-panel glass-panel" aria-label="Incident scoring configuration">
       <div className="feedback-header-area">
         <h3 className="feedback-title">Triage Weights Configuration</h3>
-        <p className="feedback-subtitle">
-          Adjust the relative importance of operational factors. The total budget must equal exactly 100%.
-        </p>
+        {disabled ? (
+          <p className="feedback-subtitle" style={{ color: 'var(--state-warning)' }}>
+            Sliders are locked while inspecting static historical snapshots in Replay Mode.
+          </p>
+        ) : (
+          <p className="feedback-subtitle">
+            Adjust the relative importance of operational factors. The total budget must equal exactly 100%.
+          </p>
+        )}
       </div>
 
       <form onSubmit={handleSubmit} className="feedback-form">
@@ -113,7 +119,7 @@ function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading }) {
                 step="1"
                 value={tempWeights[slider.id]}
                 onChange={(e) => handleSliderChange(slider.id, e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || disabled}
                 className="weight-range-input"
               />
             </div>
@@ -149,10 +155,10 @@ function FeedbackPanel({ currentWeights, onUpdateWeights, isLoading }) {
 
           <button
             type="submit"
-            disabled={!isBudgetBalanced || isLoading}
+            disabled={!isBudgetBalanced || isLoading || disabled}
             className="apply-weights-btn"
           >
-            {isLoading ? 'Recalculating...' : 'Apply Custom Weights'}
+            {disabled ? 'Replay Mode Locked' : isLoading ? 'Recalculating...' : 'Apply Custom Weights'}
           </button>
         </div>
       </form>

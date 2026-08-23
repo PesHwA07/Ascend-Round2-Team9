@@ -3,6 +3,7 @@ import Header from './components/Header.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import EventDetail from './components/EventDetail.jsx'
 import FeedbackPanel from './components/FeedbackPanel.jsx'
+import TriageHistory from './components/TriageHistory.jsx'
 import { useApi } from './hooks/useApi.js'
 import './index.css'
 
@@ -185,6 +186,11 @@ function App() {
   const [isLoading, setIsLoading] = useState(true)
   const [isReplayMode, setIsReplayMode] = useState(false)
 
+  // Triage Run Archives state variables
+  const [historyList, setHistoryList] = useState([])
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState(null)
+
   const api = useApi();
 
   // Unified data load fetch controller
@@ -220,6 +226,52 @@ function App() {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Fetch archives list when active view shifts to history
+  const loadHistory = useCallback(async () => {
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      if (connectionStatus === 'online') {
+        const response = await api.getHistory();
+        // Handle various list wrappers returned by different DB models
+        const list = response.history || response.snapshots || (Array.isArray(response) ? response : []);
+        setHistoryList(list);
+      } else {
+        // Fallback history run items for Sandbox demo runs
+        setHistoryList([
+          {
+            triage_id: "7320b982-f8c6-4b0d-95cf-06f128c7724a",
+            generated_at: "2026-08-23T10:30:00Z",
+            total_events: 42,
+            top_event_title: "Memory usage breach: user container saturated (98%)",
+            top_score: 0.94,
+            weights_used: { severity: 0.3, frequency: 0.2, recency: 0.15, anomaly: 0.2, business_impact: 0.15 },
+            execution_time_ms: 182.5
+          },
+          {
+            triage_id: "a1a2a3a4-b1b2-c3c4-d5d6-e7e8e9e0e1e2",
+            generated_at: "2026-08-23T10:15:00Z",
+            total_events: 31,
+            top_event_title: "HTTP 500 internal server spike on gateway (P99 latency > 8s)",
+            top_score: 0.86,
+            weights_used: { severity: 0.35, frequency: 0.15, recency: 0.15, anomaly: 0.2, business_impact: 0.15 },
+            execution_time_ms: 210.0
+          }
+        ]);
+      }
+    } catch (err) {
+      setHistoryError(err.message || 'Failed to retrieve triage archives.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, [api, connectionStatus]);
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      loadHistory();
+    }
+  }, [activeTab, loadHistory]);
 
   // Periodic heartbeat monitor checking API connectivity every 10 seconds
   useEffect(() => {
@@ -261,6 +313,55 @@ function App() {
   const handleExitReplay = () => {
     setIsReplayMode(false)
     loadData();
+  }
+
+  // Fetch full historical snapshot and trigger Replay Mode
+  const handleReplaySnapshot = async (snapshotId) => {
+    setIsLoading(true);
+    try {
+      let data = null;
+      if (connectionStatus === 'online') {
+        data = await api.replaySnapshot(snapshotId);
+      } else {
+        // Fallback local sandbox simulator for Demo Replays
+        console.log('Replaying snapshot locally in DEMO MODE:', snapshotId);
+        if (snapshotId === "7320b982-f8c6-4b0d-95cf-06f128c7724a") {
+          data = MOCK_TRIAGE_DATA;
+        } else {
+          // Synthesize an altered dataset to visually demonstrate re-ordering
+          data = {
+            ...MOCK_TRIAGE_DATA,
+            triage_id: snapshotId,
+            snapshot_id: snapshotId,
+            summary: "Replayed sandbox data showing historical snapshots.",
+            ranked_events: [
+              MOCK_TRIAGE_DATA.ranked_events[1], // Move gateway error to rank #1
+              MOCK_TRIAGE_DATA.ranked_events[0],
+              MOCK_TRIAGE_DATA.ranked_events[2],
+              MOCK_TRIAGE_DATA.ranked_events[3]
+            ].map((e, idx) => ({
+              ...e,
+              rank: idx + 1
+            }))
+          };
+        }
+      }
+      
+      if (data) {
+        setTriageData(data);
+        // Sync active weight sliders to match values in the historical run
+        if (data.weights_used || data.weights_applied) {
+          setActiveWeights(data.weights_used || data.weights_applied);
+        }
+        setIsReplayMode(true);
+        setActiveTab('brief'); // Re-direct operator back to Dashboard briefing layout
+      }
+    } catch (err) {
+      console.error('Failed to replay snapshot run:', err.message);
+      alert(`Snapshot Replay Failed: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   // Expose feedback updates handler (used by FeedbackPanel)
@@ -348,6 +449,7 @@ function App() {
           <FeedbackPanel
             currentWeights={activeWeights}
             onUpdateWeights={handleUpdateWeights}
+            disabled={isReplayMode} // Block sliders in Replay Mode
             isLoading={isLoading}
           />
           <Dashboard
@@ -362,29 +464,13 @@ function App() {
       )}
 
       {activeTab === 'history' && (
-        <main className="placeholder-container">
-          <div className="placeholder-badge">
-            <span className="dot yellow" aria-hidden="true"></span>
-            <span>Triage History Panel</span>
-          </div>
-          <h1 className="placeholder-title">Triage Archives</h1>
-          <p className="placeholder-description">
-            Archived operations briefs. Click a snapshot card here in the future to trigger static Replay Mode across the dashboard.
-          </p>
-          <div className="system-status-terminal glass-panel">
-            <div className="terminal-header">
-              <span className="terminal-title">triage_replay_module.sys</span>
-            </div>
-            <div className="terminal-line">
-              <span className="terminal-prompt">&gt;</span>
-              <span>listening for snapshot triggers...</span>
-            </div>
-            <div className="terminal-line">
-              <span className="terminal-prompt">&gt;</span>
-              <span>replay components: <span className="terminal-value-info">DISCONNECTED (Step 5)</span></span>
-            </div>
-          </div>
-        </main>
+        <TriageHistory
+          historyList={historyList}
+          onReplaySnapshot={handleReplaySnapshot}
+          isLoading={isHistoryLoading}
+          error={historyError}
+          onRefresh={loadHistory}
+        />
       )}
 
       {activeTab === 'audit' && (
