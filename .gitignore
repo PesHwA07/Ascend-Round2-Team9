@@ -8,3 +8,7 @@ __pycache__/
 
 # Test / tooling caches
 .pytest_cache/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
