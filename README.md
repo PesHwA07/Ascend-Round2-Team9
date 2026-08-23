@@ -4,6 +4,12 @@
 
 AuraBrief 95 ingests simulated event streams from infrastructure, applications, and deployment pipelines, applies intelligent weighted scoring to rank incidents by priority, generates natural-language explanations using LLM, and surfaces results through a responsive operator console.
 
+### Key Features
+- 📱 **Mobile-Ready Responsive UI**: The frontend is built mobile-first and fully responsive. The dashboard layout, navigation, and event cards automatically adapt to fit phone and tablet screens perfectly.
+- 🧠 **Intelligent Triage & Ranking**: Deterministic 5-signal scoring system that bubbles up critical incidents automatically.
+- 🤖 **Gen-AI Explanations**: Automated incident briefings powered by a local Ollama LLM (llama3) with template fallback.
+- ⏪ **Historical Replay**: View and interact with past triage snapshots directly in the dashboard.
+
 ### Dashboard & Briefing
 ![Dashboard](./docs/assets/dashboard.png)
 
