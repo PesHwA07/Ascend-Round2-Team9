@@ -2,12 +2,12 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any
 
 
-# Default weights — total = 1.0
 DEFAULT_WEIGHTS = {
     "severity": 0.30,
-    "blast_radius": 0.25,
-    "anomaly": 0.25,
-    "recurrence": 0.20,
+    "business_impact": 0.15,
+    "anomaly": 0.20,
+    "frequency": 0.20,
+    "recency": 0.15,
 }
 
 SEVERITY_MAP = {
@@ -20,37 +20,30 @@ SEVERITY_MAP = {
 
 
 def calculate_severity_score(severity: str) -> float:
-    """Convert severity level to a normalized 0-1 score."""
+    """Convert severity into a normalized 0-1 score."""
     return SEVERITY_MAP.get(str(severity).lower(), 0.0)
 
 
-def calculate_blast_radius_score(event: Dict[str, Any]) -> float:
-    """
-    Estimate impact based on affected service/environment/region.
-    Uses raw_payload values when available.
-    """
-
+def calculate_business_impact_score(event: Dict[str, Any]) -> float:
+    """Estimate business impact from environment, region and service."""
     raw = event.get("raw_payload") or {}
 
-    # If simulator/API provides an explicit blast radius, use it.
-    if "blast_radius" in raw:
+    if "business_impact" in raw:
         try:
-            return max(0.0, min(float(raw["blast_radius"]), 1.0))
+            return max(0.0, min(float(raw["business_impact"]), 1.0))
         except (TypeError, ValueError):
             pass
 
     score = 0.0
 
-    # Production systems are more important.
     if str(event.get("environment", "")).lower() == "production":
         score += 0.35
 
-    # Global region suggests wider impact.
     if str(event.get("region", "")).lower() == "global":
         score += 0.30
 
-    # Common high-impact service keywords.
     service = str(event.get("service", "")).lower()
+
     high_impact_services = [
         "payment",
         "database",
@@ -59,23 +52,20 @@ def calculate_blast_radius_score(event: Dict[str, Any]) -> float:
         "checkout",
     ]
 
-    if any(x in service for x in high_impact_services):
+    if any(keyword in service for keyword in high_impact_services):
         score += 0.35
 
     return min(score, 1.0)
 
 
 def calculate_anomaly_score(event: Dict[str, Any]) -> float:
-    """
-    Rule-based anomaly detection.
-    No LLM/ML is used, making the result deterministic.
-    """
-
+    """Deterministic rule-based anomaly score."""
     score = 0.0
 
     text = (
-        str(event.get("title", "")) + " " +
-        str(event.get("description", ""))
+        str(event.get("title", ""))
+        + " "
+        + str(event.get("description", ""))
     ).lower()
 
     anomaly_keywords = [
@@ -94,7 +84,6 @@ def calculate_anomaly_score(event: Dict[str, Any]) -> float:
     ]
 
     matches = sum(1 for word in anomaly_keywords if word in text)
-
     score += min(matches * 0.15, 0.45)
 
     severity = str(event.get("severity", "")).lower()
@@ -106,29 +95,26 @@ def calculate_anomaly_score(event: Dict[str, Any]) -> float:
 
     raw = event.get("raw_payload") or {}
 
-    # Optional telemetry-based anomaly indicators.
     if raw.get("error_rate") is not None:
         try:
             error_rate = float(raw["error_rate"])
+
             if error_rate >= 0.20:
                 score += 0.25
             elif error_rate >= 0.10:
                 score += 0.15
+
         except (TypeError, ValueError):
             pass
 
     return min(score, 1.0)
 
 
-def calculate_recurrence_score(
+def calculate_frequency_score(
     event: Dict[str, Any],
     all_events: List[Dict[str, Any]],
 ) -> float:
-    """
-    Calculate how frequently similar events occur.
-    Similarity is based on event_type + service.
-    """
-
+    """Score repeated occurrences of the same event type and service."""
     event_type = event.get("event_type")
     service = event.get("service")
 
@@ -139,55 +125,68 @@ def calculate_recurrence_score(
         and other.get("service") == service
     )
 
-    # 5 or more repeated events reaches maximum recurrence score.
     return min(count / 5.0, 1.0)
+
+
+def calculate_recency_score(event: Dict[str, Any]) -> float:
+    """
+    Recent events receive a higher score.
+    Uses event timestamp when available.
+    """
+    timestamp = event.get("timestamp")
+
+    if not timestamp:
+        return 0.5
+
+    try:
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(
+                timestamp.replace("Z", "+00:00")
+            )
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        age_seconds = max((now - timestamp).total_seconds(), 0)
+
+        # 0 minutes old -> 1.0
+        # 30 minutes old -> 0.5
+        # 60+ minutes old -> 0.0
+        score = max(0.0, 1.0 - age_seconds / 3600.0)
+
+        return round(score, 3)
+
+    except (TypeError, ValueError):
+        return 0.5
 
 
 def calculate_priority_score(
     severity_score: float,
-    blast_radius_score: float,
+    business_impact_score: float,
     anomaly_score: float,
-    recurrence_score: float,
+    frequency_score: float,
+    recency_score: float,
     weights: Dict[str, float],
 ) -> float:
-    """Calculate final priority score from 0-100."""
-
-    score = (
+    """Calculate final normalized priority score from 0.0 to 1.0."""
+    return round(
         severity_score * weights["severity"]
-        + blast_radius_score * weights["blast_radius"]
+        + business_impact_score * weights["business_impact"]
         + anomaly_score * weights["anomaly"]
-        + recurrence_score * weights["recurrence"]
+        + frequency_score * weights["frequency"]
+        + recency_score * weights["recency"],
+        3,
     )
-
-    return round(score * 100, 2)
-
-
-def get_priority(score: float) -> str:
-    """Convert score into priority label."""
-
-    if score >= 80:
-        return "critical"
-    if score >= 60:
-        return "high"
-    if score >= 40:
-        return "medium"
-
-    return "low"
 
 
 def rank_events(
     events: List[Dict[str, Any]],
     weights: Dict[str, float] | None = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Main ranking engine.
-
-    Takes incoming events and returns ranked triage items.
-    """
-
+    """Calculate five-factor scores and rank events."""
     weights = weights or DEFAULT_WEIGHTS.copy()
 
-    # Normalize weights to guarantee deterministic total = 1.
     total = sum(weights.values())
 
     if total <= 0:
@@ -201,46 +200,51 @@ def rank_events(
     ranked = []
 
     for event in events:
-        severity_score = calculate_severity_score(
+        severity = calculate_severity_score(
             event.get("severity", "medium")
         )
 
-        blast_radius_score = calculate_blast_radius_score(event)
+        business_impact = calculate_business_impact_score(event)
 
-        anomaly_score = calculate_anomaly_score(event)
+        anomaly = calculate_anomaly_score(event)
 
-        recurrence_score = calculate_recurrence_score(
+        frequency = calculate_frequency_score(
             event,
             events,
         )
 
-        priority_score = calculate_priority_score(
-            severity_score,
-            blast_radius_score,
-            anomaly_score,
-            recurrence_score,
+        recency = calculate_recency_score(event)
+
+        priority = calculate_priority_score(
+            severity,
+            business_impact,
+            anomaly,
+            frequency,
+            recency,
             weights,
         )
 
-        ranked.append({
-            "event_id": event.get("id"),
-            "rank": 0,
-            "priority_score": priority_score,
-            "severity_score": round(severity_score, 3),
-            "blast_radius_score": round(blast_radius_score, 3),
-            "anomaly_score": round(anomaly_score, 3),
-            "recurrence_score": round(recurrence_score, 3),
-            "status": "open",
-            "event": event,
-        })
+        ranked.append(
+            {
+                "event_id": event.get("id"),
+                "rank": 0,
+                "score": priority,
+                "priority_score": priority,
+                "severity_score": round(severity, 3),
+                "business_impact_score": round(business_impact, 3),
+                "anomaly_score": round(anomaly, 3),
+                "frequency_score": round(frequency, 3),
+                "recency_score": round(recency, 3),
+                "status": "open",
+                "event": event,
+            }
+        )
 
-    # Highest score first.
     ranked.sort(
         key=lambda item: item["priority_score"],
         reverse=True,
     )
 
-    # Assign rank after sorting.
     for index, item in enumerate(ranked, start=1):
         item["rank"] = index
 
@@ -252,29 +256,29 @@ def adjust_weights(
     feedback: Dict[str, float],
 ) -> Dict[str, float]:
     """
-    Feedback loop.
+    Update ranking weights using operator feedback.
 
-    Example:
-    {
-        "severity_weight": 0.35,
-        "anomaly_weight": 0.30
-    }
+    Supported keys:
+    severity_weight
+    business_impact_weight
+    anomaly_weight
+    frequency_weight
+    recency_weight
     """
-
     updated = current_weights.copy()
 
     mapping = {
         "severity_weight": "severity",
-        "blast_radius_weight": "blast_radius",
+        "business_impact_weight": "business_impact",
         "anomaly_weight": "anomaly",
-        "recurrence_weight": "recurrence",
+        "frequency_weight": "frequency",
+        "recency_weight": "recency",
     }
 
     for feedback_key, weight_key in mapping.items():
         if feedback_key in feedback:
             updated[weight_key] = float(feedback[feedback_key])
 
-    # Keep weights valid and deterministic.
     updated = {
         key: max(0.0, min(float(value), 1.0))
         for key, value in updated.items()
@@ -282,7 +286,7 @@ def adjust_weights(
 
     total = sum(updated.values())
 
-    if total == 0:
+    if total <= 0:
         return DEFAULT_WEIGHTS.copy()
 
     return {
