@@ -12,3 +12,9 @@ __pycache__/
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Database files
+data/
+*.db
+*.db-shm
+*.db-wal
