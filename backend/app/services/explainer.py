@@ -20,10 +20,20 @@ Fallback         : deterministic template explanations built from the same
                    Ollama is unavailable, errors, times out or returns an
                    invalid/malformed response — so the demo never breaks.
 
+Input contract (matches backend/app/services/ranking.py::rank_events):
+    event        : ORM Event (or dict) — source/details/tags/timestamp/etc.
+    ranking_data : {"event", "rank",
+                    "score"/"priority_score": 0.0-1.0,
+                    "score_breakdown": {"severity", "frequency", "recency",
+                                        "anomaly", "business_impact"}}
+Consumed strictly read-only; legacy flat-score dicts are still tolerated.
+
 Public interface:
     await generate_explanation(event, ranking_data) -> contract dict above
     await generate_explanation_pair(event, ranking_data)
-        -> (explanation_text, suggested_action)  # legacy triage-router shape
+        -> (explanation_text, suggested_action)
+    await generate_explanation_trio(event, ranking_data)
+        -> (explanation_text, "ai"|"template", suggested_action)  # triage router
     await generate_explanations_for_ranked(ranked_items, top_n=N)
 """
 
@@ -60,7 +70,10 @@ _DEFAULTS = {
 
 
 def _setting(name: str) -> str:
-    """Resolve a Gen-AI setting: backend Settings -> env var -> default."""
+    """Resolve a Gen-AI setting: backend Settings -> env var -> default.
+
+    Honours the backend's ``OLLAMA_HOST`` naming as well as ``OLLAMA_BASE_URL``.
+    """
     try:
         from backend.app.config import settings  # teammate-owned config
 
@@ -70,6 +83,23 @@ def _setting(name: str) -> str:
     except Exception:
         pass
     return os.getenv(name, _DEFAULTS[name])
+
+
+def _base_url() -> str:
+    """Ollama endpoint, tolerating the backend's Docker-oriented OLLAMA_HOST."""
+    candidates = [os.getenv("OLLAMA_BASE_URL"), os.getenv("OLLAMA_HOST")]
+    try:
+        from backend.app.config import settings  # teammate-owned config
+
+        candidates.append(getattr(settings, "OLLAMA_HOST", None))
+        candidates.append(getattr(settings, "OLLAMA_BASE_URL", None))
+    except Exception:
+        pass
+    for candidate in candidates:
+        # Skip the Docker-bridge default; this module may run outside Docker.
+        if candidate and "host.docker.internal" not in str(candidate):
+            return str(candidate).rstrip("/")
+    return _DEFAULTS["OLLAMA_BASE_URL"]
 
 
 def _as_bool(value: Any) -> bool:
@@ -111,6 +141,29 @@ def _field(event: Any, name: str, default: Any = "") -> Any:
     return getattr(event, name, default)
 
 
+def _event_details(event: Any) -> Dict[str, Any]:
+    """Actual schema: ``Event.details`` (legacy alias ``raw_payload``)."""
+    details = _field(event, "details", None)
+    if details is None:
+        details = _field(event, "raw_payload", {})
+    if not isinstance(details, dict):
+        return {}
+    return details
+
+
+def _event_tags(event: Any) -> list:
+    tags = _field(event, "tags", None)
+    if not isinstance(tags, (list, tuple)):
+        tags = _event_details(event).get("tags") or []
+    return list(tags)
+
+
+def _event_source(event: Any) -> str:
+    """Actual schema: ``source`` in {infra-monitor, app-errors, deploy-events}."""
+    source = _field(event, "source", "") or _field(event, "stream_source", "")
+    return str(source or "").lower()
+
+
 def _num(ranking_data: Dict[str, Any], key: str) -> float:
     try:
         return float(ranking_data.get(key, 0.0))
@@ -121,30 +174,68 @@ def _num(ranking_data: Dict[str, Any], key: str) -> float:
 def _headline_score(ranking_data: Dict[str, Any]) -> float:
     """The engine's final composite score, whichever key the caller supplies.
 
-    Supports ``priority_score`` (current backend) and ``final_score`` (PRD
-    wording). Read-only: never computed, never written back.
+    Actual backend: ``score`` (aliased as ``priority_score``), 0.0-1.0.
+    Read-only: never computed, never written back.
     """
-    if "priority_score" in ranking_data:
-        return _num(ranking_data, "priority_score")
-    return _num(ranking_data, "final_score")
+    for key in ("score", "priority_score", "final_score"):
+        if key in ranking_data:
+            return _num(ranking_data, key)
+    return 0.0
+
+
+def _score_breakdown(ranking_data: Dict[str, Any]) -> Dict[str, float]:
+    """Actual backend: weighted per-signal contributions in ``score_breakdown``.
+
+    Values are consumed verbatim (they are component x weight results produced
+    by the ranking engine). Legacy flat keys are tolerated when the breakdown
+    dict is absent.
+    """
+    breakdown = ranking_data.get("score_breakdown")
+    if isinstance(breakdown, dict):
+        result = {}
+        for key in ("severity", "frequency", "recency", "anomaly", "business_impact"):
+            value = breakdown.get(key)
+            if isinstance(value, (int, float)):
+                result[key] = float(value)
+        if result:
+            return result
+
+    # Legacy flat vocabulary (pre-harmonisation callers) — still read-only.
+    legacy = {}
+    for key in (
+        "severity_score",
+        "frequency_score",
+        "recency_score",
+        "anomaly_score",
+        "business_impact_score",
+        "blast_radius_score",
+        "recurrence_score",
+    ):
+        if key in ranking_data:
+            legacy[key.replace("_score", "")] = _num(ranking_data, key)
+    return legacy
+
+
+def _fmt_signal(value: float) -> str:
+    return f"{value:.2f}"
 
 
 # ---------------------------------------------------------------------------
 # Prompt engineering
 # ---------------------------------------------------------------------------
 
-_PROMPT_TEMPLATE = """You are an AIOps operations assistant. An incident was ALREADY scored and ranked by a deterministic engine. Explain that result to an on-call operator. Never change rankings, never recalculate scores, never invent facts or metrics not listed below.
+_PROMPT_TEMPLATE = """You are an AIOps operations assistant. An incident was ALREADY scored and ranked by a deterministic 5-signal engine. Explain that result to an on-call operator. Never change rankings, never recalculate scores, never invent facts or metrics not listed below.
 
 INCIDENT (already ranked):
-- Rank: #{rank}; Priority Score: {headline_score}/100
-- Breakdown: severity={severity_score}, blast_radius={blast_radius_score}, anomaly={anomaly_score}, recurrence={recurrence_score} (each /100){extra_scores_line}
-- Severity: {severity}; Service: {service}; Environment: {environment}; Region: {region}
-- Type: {event_type}; Title: {title}
-- Description: {description}{tags_line}
+- Rank: #{rank}; Priority Score: {headline_score} (scale 0.0-1.0)
+- Weighted signal contributions from the scoring engine: severity={severity}, frequency={frequency}, recency={recency}, anomaly={anomaly}, business_impact={business_impact}
+- Severity: {severity_level}; Service: {service}; Environment: {environment}; Region: {region}
+- Source stream: {source}; Type: {event_type}; Title: {title}
+- Description: {description}{tags_line}{details_line}
 
 OUTPUT RULES:
 1. "summary": what happened (max 15 words).
-2. "why_prioritized": why it ranked here; cite its rank number plus two score values (max 20 words).
+2. "why_prioritized": why it ranked here; cite its rank number and reference at least two of the weighted contributions above exactly as given (max 20 words).
 3. "recommended_action": the first investigation step (max 15 words).
 4. Plain text only. Respond with ONLY valid JSON, no markdown:
 {{"summary": "...", "why_prioritized": "...", "recommended_action": "..."}}"""
@@ -153,41 +244,48 @@ OUTPUT RULES:
 def build_prompt(event: Any, ranking_data: Dict[str, Any]) -> str:
     """Render the AIOps explanation prompt from existing event + ranking data.
 
-    Values are consumed verbatim from ``ranking_data``; nothing is recalculated.
-    Optional PRD-style component scores (frequency/recency/business impact) are
-    included only when the caller supplied them.
+    Values are consumed verbatim from ``ranking_data``/``event``; nothing is
+    recalculated.
     """
-    payload = _field(event, "raw_payload", {}) or {}
-    if not isinstance(payload, dict):
-        payload = {}
-    tags = payload.get("tags") or []
+    details = _event_details(event)
+    tags = _event_tags(event)
     tags_line = f"\n- Tags: {', '.join(str(t) for t in tags)}" if tags else ""
     description = str(_field(event, "description", "") or "").strip()
     if len(description) > 200:
         description = description[:200] + "..."
 
-    extras = []
-    for key in ("frequency_score", "recency_score", "business_impact_score"):
-        if key in ranking_data:
-            extras.append(f"{key.replace('_score', '')}={_num(ranking_data, key):.0f}")
-    extra_scores_line = f"\n- Additional factors: {', '.join(extras)}" if extras else ""
+    interesting = {
+        k: details[k]
+        for k in (
+            "metric_name", "metric_value", "threshold", "error_type",
+            "error_rate_percent", "deploy_type", "version_to",
+        )
+        if k in details
+    }
+    details_line = (
+        f"\n- Key details: {json.dumps(interesting, default=str)}" if interesting else ""
+    )
+
+    breakdown = _score_breakdown(ranking_data)
 
     return _PROMPT_TEMPLATE.format(
         rank=int(_num(ranking_data, "rank") or 0),
-        headline_score=_headline_score(ranking_data),
-        severity_score=_num(ranking_data, "severity_score"),
-        blast_radius_score=_num(ranking_data, "blast_radius_score"),
-        anomaly_score=_num(ranking_data, "anomaly_score"),
-        recurrence_score=_num(ranking_data, "recurrence_score"),
-        extra_scores_line=extra_scores_line,
-        severity=str(_field(event, "severity", "unknown")),
+        headline_score=_fmt_signal(_headline_score(ranking_data)),
+        severity=_fmt_signal(breakdown.get("severity", 0.0)),
+        frequency=_fmt_signal(breakdown.get("frequency", 0.0)),
+        recency=_fmt_signal(breakdown.get("recency", 0.0)),
+        anomaly=_fmt_signal(breakdown.get("anomaly", 0.0)),
+        business_impact=_fmt_signal(breakdown.get("business_impact", 0.0)),
+        severity_level=str(_field(event, "severity", "unknown")),
         service=str(_field(event, "service", "unknown-service")),
         environment=str(_field(event, "environment", "production")),
         region=str(_field(event, "region", "global")),
+        source=_event_source(event) or "(unspecified)",
         event_type=str(_field(event, "event_type", "unknown")),
         title=str(_field(event, "title", "")).strip() or "(untitled)",
         description=description or "(none supplied)",
         tags_line=tags_line,
+        details_line=details_line,
     )
 
 
@@ -214,9 +312,7 @@ async def call_ollama(prompt: str) -> str:
         },
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{_setting('OLLAMA_BASE_URL').rstrip('/')}/api/generate", json=body
-        )
+        response = await client.post(f"{_base_url()}/api/generate", json=body)
         response.raise_for_status()
         return str(response.json().get("response", ""))
 
@@ -271,29 +367,30 @@ def parse_explanation(raw: str) -> Optional[Dict[str, str]]:
 
 
 def _incident_category(event: Any) -> str:
+    """Categorise from the actual stream names first, then keyword signals."""
+    source = _event_source(event)
     etype = str(_field(event, "event_type", "")).lower()
-    source = str(_field(event, "stream_source", "")).lower()
     title = str(_field(event, "title", "")).lower()
-    blob = f"{etype} {source} {title}"
+    blob = f"{etype} {title}"
 
-    deploy_words = (
-        "deploy", "rollback", "release", "canary", "rollout", "migration", "config change"
-    )
-    infra_words = (
-        "cpu", "memory", "disk", "container", "pod", "node", "host", "infra", "oom",
-    )
-    security_words = ("auth", "login", "security", "credential", "waf", "token")
-    app_words = (
-        "error", "exception", "http", "500", "503", "latency", "timeout", "payment",
-        "circuit", "crash", "checkout",
-    )
-    if any(word in blob for word in deploy_words):
+    if source == "deploy-events" or any(
+        w in blob for w in ("deploy", "rollback", "release", "canary", "rollout", "migration")
+    ):
         return "deployment"
-    if any(word in blob for word in infra_words):
+    if source == "infra-monitor" or any(
+        w in blob for w in ("cpu", "memory", "disk", "container", "pod", "node", "host", "infra", "oom")
+    ):
         return "infrastructure"
-    if any(word in blob for word in security_words):
+    if any(
+        w in blob for w in ("auth", "login", "security", "credential", "waf", "token")
+    ):
         return "security"
-    if any(word in blob for word in app_words):
+    if source == "app-errors" or any(
+        w in blob for w in (
+            "error", "exception", "http", "500", "503", "latency", "timeout",
+            "payment", "circuit", "crash", "checkout",
+        )
+    ):
         return "application_error"
     return "generic"
 
@@ -323,67 +420,86 @@ _ACTIONS = {
 
 
 def _why_prioritized(event: Any, ranking_data: Dict[str, Any]) -> str:
-    reasons = []
-    severity = str(_field(event, "severity", "unknown")).lower()
-    if severity in ("critical", "high"):
-        reasons.append(f"{severity} severity")
+    """Describe the engine's supplied signal contributions — never recomputed.
 
-    anomaly = _num(ranking_data, "anomaly_score")
-    if anomaly >= 60:
-        reasons.append(f"elevated anomaly score ({anomaly:.0f}/100)")
-    elif anomaly >= 35:
-        reasons.append(f"moderate anomaly score ({anomaly:.0f}/100)")
+    ``score_breakdown`` values are weighted contributions produced by the
+    ranking engine. We surface the strongest ones verbatim; no weight values,
+    normalisation or arithmetic beyond reading what was supplied.
+    """
+    breakdown = _score_breakdown(ranking_data)
+    ordered = sorted(breakdown.items(), key=lambda kv: kv[1], reverse=True)
 
-    blast = _num(ranking_data, "blast_radius_score")
-    business_impact = _num(ranking_data, "business_impact_score")
-    if max(blast, business_impact) >= 60:
-        label = "business impact" if business_impact >= blast else "blast radius"
-        reasons.append(f"wide {label} ({max(blast, business_impact):.0f}/100)")
-
-    recurrence = _num(ranking_data, "recurrence_score")
-    frequency = _num(ranking_data, "frequency_score")
-    recency = _num(ranking_data, "recency_score")
-    if max(recurrence, frequency) >= 60:
-        reasons.append(f"frequent recurrence ({max(recurrence, frequency):.0f}/100)")
-    if recency >= 60:
-        reasons.append(f"very recent occurrence ({recency:.0f}/100)")
-
-    environment = str(_field(event, "environment", "production")).lower()
-    if environment == "production":
-        reasons.append("production impact")
-
-    driver = ", ".join(reasons) if reasons else "its composite weighted score"
     rank = int(_num(ranking_data, "rank") or 0)
+    headline = f"Ranked #{rank} by the scoring engine (score {_fmt_signal(_headline_score(ranking_data))})"
+
+    if not ordered:
+        return f"{headline} for its composite weighted score."
+
+    leading = ", ".join(f"{name} {_fmt_signal(value)}" for name, value in ordered[:3])
+    strongest = ordered[0][0].replace("_", " ")
+    severity = str(_field(event, "severity", "unknown")).lower()
+    severity_note = f" with {severity} severity" if severity in ("critical", "warning", "high") else ""
+
+    return f"{headline}: leading contributions were {leading}{severity_note} (strongest signal: {strongest})."
+
+
+def _summary_text(event: Any, category: str) -> str:
+    severity = str(_field(event, "severity", "unknown")).upper()
+    service = str(_field(event, "service", "unknown-service"))
+    region = str(_field(event, "region", "global"))
+    environment = str(_field(event, "environment", "production"))
+    title = str(_field(event, "title", "")).strip()
+    details = _event_details(event)
+    location = f"{environment} ({region})" if environment != "production" else region
+
+    labels = {
+        "deployment": "deployment incident",
+        "infrastructure": "infrastructure alert",
+        "security": "security incident",
+        "application_error": "application error",
+        "generic": "operational event",
+    }
+
+    extra = ""
+    if category == "infrastructure":
+        metric = str(details.get("metric_name", "")).replace("_", " ").strip()
+        if metric:
+            value = details.get("metric_value", "?")
+            threshold = details.get("threshold")
+            extra = f": {metric} at {value}" + (
+                f" exceeds threshold {threshold}" if threshold is not None else ""
+            )
+    elif category == "application_error":
+        etype = str(details.get("error_type", "")).replace("_", " ").strip()
+        rate = details.get("error_rate_percent")
+        parts = [p for p in (etype, f"{rate}% error rate" if rate is not None else "") if p]
+        if parts:
+            extra = f": {', '.join(str(p) for p in parts)}"
+    elif category == "deployment":
+        dtype = str(details.get("deploy_type", "")).replace("_", " ").strip()
+        version_to = details.get("version_to")
+        reason = details.get("failure_reason")
+        parts = [p for p in (dtype, f"to {version_to}" if version_to else "") if p]
+        if parts:
+            extra = f": {' '.join(str(p) for p in parts)}"
+            if reason:
+                extra += f"; reason: {reason}"
+
     return (
-        f"Ranked #{rank} by the scoring engine due to {driver} "
-        f"(priority score {_headline_score(ranking_data):.0f}/100)."
+        f"{severity}: {labels[category]} on '{service}' in {location}"
+        + (extra or (f": {title}" if title else ""))
+        + "."
     )
 
 
 def _template_structured(event: Any, ranking_data: Dict[str, Any]) -> Dict[str, str]:
     """Deterministic fallback in the exact contract shape (provider=fallback)."""
     category = _incident_category(event)
-    severity = str(_field(event, "severity", "unknown")).upper()
     service = str(_field(event, "service", "unknown-service"))
     region = str(_field(event, "region", "global"))
     environment = str(_field(event, "environment", "production"))
-    etype_human = str(_field(event, "event_type", "issue")).replace("_", " ").strip()
-    title = str(_field(event, "title", "")).strip()
-    headline = title or etype_human
 
-    location = f"{environment} ({region})" if environment != "production" else region
-
-    labels = {
-        "deployment": "deployment-related incident",
-        "infrastructure": "infrastructure incident",
-        "security": "security incident",
-        "application_error": "application incident",
-        "generic": "operational event",
-    }
-    summary = (
-        f"{severity}: {labels[category]} detected on '{service}' "
-        f"in {location}: {headline}."
-    )
+    summary = _summary_text(event, category)
 
     action_template = _ACTIONS.get(category, _ACTIONS["generic"])
     action = action_template.format(service=service, region=region, environment=environment)
@@ -502,10 +618,27 @@ async def generate_explanation(
 async def generate_explanation_pair(
     event: Any, ranking_data: Dict[str, Any]
 ) -> Tuple[str, str]:
-    """Legacy adapter matching the existing triage-router stub signature.
+    """Adapter returning ``(explanation_text, suggested_action)``.
 
-    Returns ``(explanation_text, suggested_action)`` where the explanation text
-    combines summary and why-prioritized reasoning. Thin wrapper over
-    :func:`generate_explanation`; same guarantees apply.
+    Thin wrapper over :func:`generate_explanation`; same guarantees apply.
     """
     return _to_pair(await generate_explanation(event, ranking_data))
+
+
+def _provider_to_type(provider: str) -> str:
+    """Map contract providers onto TriageItem.explanation_type values."""
+    return "ai" if provider == PROVIDER_OLLAMA else "template"
+
+
+async def generate_explanation_trio(
+    event: Any, ranking_data: Dict[str, Any]
+) -> Tuple[str, str, str]:
+    """Adapter matching the actual triage-router unpack.
+
+    Returns ``(explanation, explanation_type, suggested_action)`` where
+    ``explanation_type`` is ``"ai"`` for Ollama output and ``"template"``
+    for fallback — exactly what ``routers/triage.py`` persists on TriageItem.
+    """
+    data = await generate_explanation(event, ranking_data)
+    explanation = f"{data['summary']} {data['why_prioritized']}".strip()
+    return explanation, _provider_to_type(data["provider"]), data["recommended_action"]

@@ -56,7 +56,7 @@ package is present, values may alternatively live in `backend/app/config.py`
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_ENABLED` | `true` | Master switch. `false` = template fallback only |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama daemon endpoint |
+| `OLLAMA_BASE_URL` / `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint. `OLLAMA_HOST` matches the backend config; its Docker-bridge default (`host.docker.internal`) is ignored when running outside Docker |
 | `OLLAMA_MODEL` | `llama3.2:3b` | Model tag (anything in `ollama list`) |
 | `OLLAMA_TIMEOUT` | `6.0` | Hard per-request timeout (seconds) |
 | `OLLAMA_NUM_PREDICT` | `150` | Max tokens generated per explanation |
@@ -105,6 +105,14 @@ curl http://localhost:11434/api/generate -d '{
 5. **Circuit breaker** — after one failure the LLM is skipped for
    `LLM_COOLDOWN_SECONDS`, so a batch never queues behind repeated timeouts.
 
+Events may be SQLAlchemy `Event` models or plain dicts. Ranking data is read-only:
+the module consumes the **actual** backend shapes from
+`feature/backend-integration` (`rank_events()` items with `score` 0.0–1.0 and
+weighted `score_breakdown{severity, frequency, recency, anomaly,
+business_impact}`, plus Event fields `source` / `details` / `tags`) and reports
+those contributions verbatim — it never recomputes, normalises or writes back
+any value, and never touches the ranking weights (asserted in tests).
+
 Public API:
 
 ```python
@@ -113,19 +121,15 @@ Public API:
   "summary", "why_prioritized", "recommended_action", "provider"
 } = await generate_explanation(event, ranking_data)
 
-# Legacy triage-router shape ((explanation_text, suggested_action)):
+# Triage-router adapter: (explanation, "ai"|"template", suggested_action)
+explanation, explanation_type, action = await generate_explanation_trio(event, ranking_data)
+
+# Two-value adapter:
 explanation_text, suggested_action = await generate_explanation_pair(event, ranking_data)
 
 # Concurrent top-N helper (wall-clock ≈ one LLM round-trip):
 await generate_explanations_for_ranked(ranked_items, top_n=3)
 ```
-
-Events may be SQLAlchemy `Event` models or plain dicts. Ranking data is read-only:
-the module consumes whatever component scores the engine supplies — both the
-current backend vocabulary (`severity_score`, `blast_radius_score`,
-`anomaly_score`, `recurrence_score`, `priority_score`) and the PRD wording
-(`frequency_score`, `recency_score`, `business_impact_score`, `final_score`) —
-and never computes or writes back any value (asserted in tests).
 
 ## Reliability & the 5-second SLA
 
@@ -154,10 +158,12 @@ ranking-input immutability, dict-shaped events, empty-event safety.
 
 ## Integration notes (for the backend/integration team)
 
-- The existing router call `explanation, action = await generate_explanation(event, item)`
-  maps 1:1 onto `generate_explanation_pair(event, item)` — same tuple, same
-  guarantees. Alternatively adopt the contract dict via
-  `await generate_explanation(event, item)`.
+- The actual router unpacks **three** values: `explanation, exp_type, action =
+  await generate_explanation(event, item)` with `exp_type` in `{"ai","template"}`
+  (persisted to `TriageItem.explanation_type`). The Gen-AI contract function
+  returns the structured dict instead, so the one-line integration change is to
+  import/call `generate_explanation_trio(event, item)` — identical tuple,
+  identical guarantees.
 - To use the faster concurrent path, replace the per-item loop with
   `await generate_explanations_for_ranked(ranked_items, top_n=settings.TOP_N_EXPLANATIONS)`
   then read `item["explanation"] / item["suggested_action"] /
