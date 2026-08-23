@@ -2,23 +2,29 @@
 
 Architectural principle: **Ranking determines priority. Gen-AI explains the ranking.**
 
-This service NEVER decides which incident is #1, NEVER reorders incidents and
-NEVER recalculates scores. It consumes the ranking engine's output verbatim and
-produces a short, structured, operator-facing explanation:
+This service NEVER decides which incident is #1, NEVER reorders incidents,
+NEVER recalculates scores and NEVER touches ranking weights. It consumes the
+ranking engine's output verbatim and produces a short, operator-facing
+explanation in the agreed contract shape:
 
     {
         "summary": "what happened",
         "why_prioritized": "why it received its current priority",
         "recommended_action": "what the operator should investigate first",
+        "provider": "ollama" | "fallback",
     }
 
 Primary provider : local Ollama (HTTP, JSON mode, no extra frameworks).
 Fallback         : deterministic template explanations built from the same
-                   event/ranking data, so the demo survives Ollama being
-                   down, slow, or returning garbage.
+                   event/ranking data (provider="fallback"), used whenever
+                   Ollama is unavailable, errors, times out or returns an
+                   invalid/malformed response — so the demo never breaks.
 
-Public interface (consumed by routers/triage.py in the triage pipeline):
-    await generate_explanation(event, score_data) -> (explanation_text, action)
+Public interface:
+    await generate_explanation(event, ranking_data) -> contract dict above
+    await generate_explanation_pair(event, ranking_data)
+        -> (explanation_text, suggested_action)  # legacy triage-router shape
+    await generate_explanations_for_ranked(ranked_items, top_n=N)
 """
 
 import asyncio
@@ -30,6 +36,9 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
+
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_FALLBACK = "fallback"
 
 logger = logging.getLogger("aurabrief.explainer")
 
@@ -102,11 +111,22 @@ def _field(event: Any, name: str, default: Any = "") -> Any:
     return getattr(event, name, default)
 
 
-def _num(score_data: Dict[str, Any], key: str) -> float:
+def _num(ranking_data: Dict[str, Any], key: str) -> float:
     try:
-        return float(score_data.get(key, 0.0))
+        return float(ranking_data.get(key, 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _headline_score(ranking_data: Dict[str, Any]) -> float:
+    """The engine's final composite score, whichever key the caller supplies.
+
+    Supports ``priority_score`` (current backend) and ``final_score`` (PRD
+    wording). Read-only: never computed, never written back.
+    """
+    if "priority_score" in ranking_data:
+        return _num(ranking_data, "priority_score")
+    return _num(ranking_data, "final_score")
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +136,8 @@ def _num(score_data: Dict[str, Any], key: str) -> float:
 _PROMPT_TEMPLATE = """You are an AIOps operations assistant. An incident was ALREADY scored and ranked by a deterministic engine. Explain that result to an on-call operator. Never change rankings, never recalculate scores, never invent facts or metrics not listed below.
 
 INCIDENT (already ranked):
-- Rank: #{rank}; Priority Score: {priority_score}/100
-- Breakdown: severity={severity_score}, blast_radius={blast_radius_score}, anomaly={anomaly_score}, recurrence={recurrence_score} (each /100)
+- Rank: #{rank}; Priority Score: {headline_score}/100
+- Breakdown: severity={severity_score}, blast_radius={blast_radius_score}, anomaly={anomaly_score}, recurrence={recurrence_score} (each /100){extra_scores_line}
 - Severity: {severity}; Service: {service}; Environment: {environment}; Region: {region}
 - Type: {event_type}; Title: {title}
 - Description: {description}{tags_line}
@@ -130,10 +150,12 @@ OUTPUT RULES:
 {{"summary": "...", "why_prioritized": "...", "recommended_action": "..."}}"""
 
 
-def build_prompt(event: Any, score_data: Dict[str, Any]) -> str:
+def build_prompt(event: Any, ranking_data: Dict[str, Any]) -> str:
     """Render the AIOps explanation prompt from existing event + ranking data.
 
-    Values are consumed verbatim from ``score_data``; nothing is recalculated.
+    Values are consumed verbatim from ``ranking_data``; nothing is recalculated.
+    Optional PRD-style component scores (frequency/recency/business impact) are
+    included only when the caller supplied them.
     """
     payload = _field(event, "raw_payload", {}) or {}
     if not isinstance(payload, dict):
@@ -144,13 +166,20 @@ def build_prompt(event: Any, score_data: Dict[str, Any]) -> str:
     if len(description) > 200:
         description = description[:200] + "..."
 
+    extras = []
+    for key in ("frequency_score", "recency_score", "business_impact_score"):
+        if key in ranking_data:
+            extras.append(f"{key.replace('_score', '')}={_num(ranking_data, key):.0f}")
+    extra_scores_line = f"\n- Additional factors: {', '.join(extras)}" if extras else ""
+
     return _PROMPT_TEMPLATE.format(
-        rank=int(_num(score_data, "rank") or 0),
-        priority_score=_num(score_data, "priority_score"),
-        severity_score=_num(score_data, "severity_score"),
-        blast_radius_score=_num(score_data, "blast_radius_score"),
-        anomaly_score=_num(score_data, "anomaly_score"),
-        recurrence_score=_num(score_data, "recurrence_score"),
+        rank=int(_num(ranking_data, "rank") or 0),
+        headline_score=_headline_score(ranking_data),
+        severity_score=_num(ranking_data, "severity_score"),
+        blast_radius_score=_num(ranking_data, "blast_radius_score"),
+        anomaly_score=_num(ranking_data, "anomaly_score"),
+        recurrence_score=_num(ranking_data, "recurrence_score"),
+        extra_scores_line=extra_scores_line,
         severity=str(_field(event, "severity", "unknown")),
         service=str(_field(event, "service", "unknown-service")),
         environment=str(_field(event, "environment", "production")),
@@ -293,39 +322,46 @@ _ACTIONS = {
 }
 
 
-def _why_prioritized(event: Any, score_data: Dict[str, Any]) -> str:
+def _why_prioritized(event: Any, ranking_data: Dict[str, Any]) -> str:
     reasons = []
     severity = str(_field(event, "severity", "unknown")).lower()
     if severity in ("critical", "high"):
         reasons.append(f"{severity} severity")
 
-    anomaly = _num(score_data, "anomaly_score")
+    anomaly = _num(ranking_data, "anomaly_score")
     if anomaly >= 60:
         reasons.append(f"elevated anomaly score ({anomaly:.0f}/100)")
     elif anomaly >= 35:
         reasons.append(f"moderate anomaly score ({anomaly:.0f}/100)")
 
-    blast = _num(score_data, "blast_radius_score")
-    if blast >= 60:
-        reasons.append(f"wide blast radius ({blast:.0f}/100)")
+    blast = _num(ranking_data, "blast_radius_score")
+    business_impact = _num(ranking_data, "business_impact_score")
+    if max(blast, business_impact) >= 60:
+        label = "business impact" if business_impact >= blast else "blast radius"
+        reasons.append(f"wide {label} ({max(blast, business_impact):.0f}/100)")
 
-    recurrence = _num(score_data, "recurrence_score")
-    if recurrence >= 60:
-        reasons.append(f"frequent recurrence ({recurrence:.0f}/100)")
+    recurrence = _num(ranking_data, "recurrence_score")
+    frequency = _num(ranking_data, "frequency_score")
+    recency = _num(ranking_data, "recency_score")
+    if max(recurrence, frequency) >= 60:
+        reasons.append(f"frequent recurrence ({max(recurrence, frequency):.0f}/100)")
+    if recency >= 60:
+        reasons.append(f"very recent occurrence ({recency:.0f}/100)")
 
     environment = str(_field(event, "environment", "production")).lower()
     if environment == "production":
         reasons.append("production impact")
 
     driver = ", ".join(reasons) if reasons else "its composite weighted score"
-    rank = int(_num(score_data, "rank") or 0)
+    rank = int(_num(ranking_data, "rank") or 0)
     return (
         f"Ranked #{rank} by the scoring engine due to {driver} "
-        f"(priority score {_num(score_data, 'priority_score'):.0f}/100)."
+        f"(priority score {_headline_score(ranking_data):.0f}/100)."
     )
 
 
-def _template_structured(event: Any, score_data: Dict[str, Any]) -> Dict[str, str]:
+def _template_structured(event: Any, ranking_data: Dict[str, Any]) -> Dict[str, str]:
+    """Deterministic fallback in the exact contract shape (provider=fallback)."""
     category = _incident_category(event)
     severity = str(_field(event, "severity", "unknown")).upper()
     service = str(_field(event, "service", "unknown-service"))
@@ -354,18 +390,17 @@ def _template_structured(event: Any, score_data: Dict[str, Any]) -> Dict[str, st
 
     return {
         "summary": summary,
-        "why_prioritized": _why_prioritized(event, score_data),
+        "why_prioritized": _why_prioritized(event, ranking_data),
         "recommended_action": action,
+        "provider": PROVIDER_FALLBACK,
     }
 
 
-def generate_template_explanation(
-    event: Any, score_data: Dict[str, Any]
-) -> Tuple[str, str]:
-    """Deterministic fallback (kept compatible with the original stub contract)."""
-    data = _template_structured(event, score_data)
-    explanation = f"{data['summary']} {data['why_prioritized']}"
-    return explanation, data["recommended_action"]
+def generate_template_structured(
+    event: Any, ranking_data: Dict[str, Any]
+) -> Dict[str, str]:
+    """Public deterministic fallback in the exact contract shape."""
+    return _template_structured(event, ranking_data)
 
 
 # ---------------------------------------------------------------------------
@@ -374,15 +409,19 @@ def generate_template_explanation(
 
 
 async def generate_structured_explanation(
-    event: Any, score_data: Dict[str, Any]
+    event: Any, ranking_data: Dict[str, Any]
 ) -> Dict[str, str]:
-    """Structured explanation via Ollama, guaranteed to fall back on any failure."""
+    """Contract output via Ollama; guaranteed fallback on any failure.
+
+    Returns exactly: summary, why_prioritized, recommended_action, provider.
+    """
     if llm_available():
         try:
-            prompt = build_prompt(event, score_data)
+            prompt = build_prompt(event, ranking_data)
             raw = await call_ollama(prompt)
             parsed = parse_explanation(raw)
             if parsed is not None:
+                parsed["provider"] = PROVIDER_OLLAMA
                 logger.info(
                     "GenAI explanation via Ollama model=%s event=%s",
                     _setting("OLLAMA_MODEL"),
@@ -396,7 +435,7 @@ async def generate_structured_explanation(
             logger.warning("Ollama unavailable (%r); using template fallback.", exc)
         _start_cooldown()
 
-    return _template_structured(event, score_data)
+    return _template_structured(event, ranking_data)
 
 
 async def generate_explanations_for_ranked(
@@ -405,9 +444,10 @@ async def generate_explanations_for_ranked(
     """Attach explanations to the ranking engine's output, concurrently.
 
     Consumes ``rank_events()`` output verbatim (list of dicts containing at
-    least ``event`` and ``rank``). Adds ``explanation`` and ``suggested_action``
-    keys to each top-N item in place; ordering is never altered. Running the
-    top-N calls concurrently keeps wall-clock time near a single LLM round-trip,
+    least ``event`` and ``rank``). Adds ``explanation``, ``suggested_action``
+    and ``explanation_provider`` keys to each top-N item in place; ordering
+    and all ranking keys are never altered. Running the top-N calls
+    concurrently keeps wall-clock time near a single LLM round-trip,
     protecting the 5-second end-to-end triage target.
     """
     targets = [item for item in ranked_items if top_n is None or item["rank"] <= top_n]
@@ -416,30 +456,56 @@ async def generate_explanations_for_ranked(
     results = await asyncio.gather(
         *(generate_explanation(item["event"], item) for item in targets)
     )
-    for item, (explanation, action) in zip(targets, results):
-        item["explanation"] = explanation
-        item["suggested_action"] = action
+    for item, data in zip(targets, results):
+        item["explanation"], item["suggested_action"] = _to_pair(data)
+        item["explanation_provider"] = data["provider"]
+
+
+def _to_pair(data: Dict[str, str]) -> Tuple[str, str]:
+    """Flatten contract output into (explanation_text, suggested_action)."""
+    return f"{data['summary']} {data['why_prioritized']}".strip(), data[
+        "recommended_action"
+    ]
 
 
 async def generate_explanation(
-    event: Any, score_data: Dict[str, Any]
-) -> Tuple[str, str]:
-    """Contract kept identical to the existing triage pipeline stub.
+    event: Any, ranking_data: Dict[str, Any]
+) -> Dict[str, str]:
+    """Agreed Gen-AI contract.
 
-    Returns ``(explanation_text, suggested_action)`` where the explanation
-    combines the structured summary and why-prioritized reasoning.
-    Never raises; never touches ranking data.
+    Input : ``event`` (ORM Event or dict) and ``ranking_data`` (the ranking
+            engine's per-item result, consumed read-only).
+    Output: {"summary", "why_prioritized", "recommended_action",
+             "provider": "ollama" | "fallback"}
+
+    Never raises; never mutates ``ranking_data``; never recomputes scores.
     """
     try:
-        data = await generate_structured_explanation(event, score_data)
-        explanation = f"{data['summary']} {data['why_prioritized']}"
-        return explanation, data["recommended_action"]
+        return await generate_structured_explanation(event, ranking_data)
     except Exception as exc:  # absolute last-resort guard
-        logger.error("Explainer unexpectedly failed (%s); minimal fallback used.", exc)
-        service = _field(event, "service", "unknown-service")
-        rank = int(_num(score_data, "rank") or 0)
-        return (
-            f"Incident on '{service}' ranked #{rank}; explanation temporarily "
-            f"unavailable.",
-            f"Triage '{service}' logs and follow standard on-call procedure.",
-        )
+        logger.error("Explainer unexpectedly failed (%r); minimal fallback used.", exc)
+        service = str(_field(event, "service", "unknown-service"))
+        rank = int(_num(ranking_data, "rank") or 0)
+        return {
+            "summary": f"Incident on '{service}' ranked #{rank}.",
+            "why_prioritized": (
+                f"Ranked #{rank} by the scoring engine; explanation "
+                f"temporarily unavailable."
+            ),
+            "recommended_action": (
+                f"Triage '{service}' logs and follow standard on-call procedure."
+            ),
+            "provider": PROVIDER_FALLBACK,
+        }
+
+
+async def generate_explanation_pair(
+    event: Any, ranking_data: Dict[str, Any]
+) -> Tuple[str, str]:
+    """Legacy adapter matching the existing triage-router stub signature.
+
+    Returns ``(explanation_text, suggested_action)`` where the explanation text
+    combines summary and why-prioritized reasoning. Thin wrapper over
+    :func:`generate_explanation`; same guarantees apply.
+    """
+    return _to_pair(await generate_explanation(event, ranking_data))

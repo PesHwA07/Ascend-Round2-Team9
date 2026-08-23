@@ -1,0 +1,10 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment / secrets — never commit; only .env.example is tracked
+.env
+
+# Test / tooling caches
+.pytest_cache/

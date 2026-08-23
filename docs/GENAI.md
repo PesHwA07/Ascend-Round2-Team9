@@ -24,13 +24,14 @@ events → ranking engine → ranked list → top N → explainer.py → Ollama
                                             Triage API response
 ```
 
-Structured output per incident:
+Structured output per incident (agreed Gen-AI contract):
 
 ```json
 {
   "summary": "what happened",
   "why_prioritized": "why the scoring engine ranked it here",
-  "recommended_action": "first thing the operator should investigate"
+  "recommended_action": "first thing the operator should investigate",
+  "provider": "ollama | fallback"
 }
 ```
 
@@ -95,29 +96,36 @@ curl http://localhost:11434/api/generate -d '{
    tokens on qwen3 models), temperature 0.2, hard timeout.
 3. **Validation** (`parse_explanation`) — tolerates markdown fences / trailing
    text, then enforces exactly three non-empty string fields (length-capped).
-4. **Fallback** — any failure (Ollama down, unreachable, slow, HTTP error,
-   malformed/empty output, unexpected exception) returns a deterministic template
-   explanation built from the *same* event/ranking data, categorised into
-   infrastructure / application-error / deployment / security / generic patterns.
-   Templates never claim the LLM produced them.
+4. **Fallback** — any failure (Ollama down, unreachable, cold model, slow, HTTP
+   error, malformed/empty output, unexpected exception) returns a deterministic
+   template explanation built from the *same* event/ranking data, in the same
+   contract shape with `provider: "fallback"`, categorised into infrastructure /
+   application-error / deployment / security / generic patterns. Templates never
+   claim the LLM produced them.
 5. **Circuit breaker** — after one failure the LLM is skipped for
    `LLM_COOLDOWN_SECONDS`, so a batch never queues behind repeated timeouts.
 
 Public API:
 
 ```python
-# Drop-in contract used by routers/triage.py (never raises):
-explanation_text, suggested_action = await generate_explanation(event, score_data)
+# Agreed contract (never raises):
+{
+  "summary", "why_prioritized", "recommended_action", "provider"
+} = await generate_explanation(event, ranking_data)
 
-# Structured form:
-{"summary", "why_prioritized", "recommended_action"} = await generate_structured_explanation(event, score_data)
+# Legacy triage-router shape ((explanation_text, suggested_action)):
+explanation_text, suggested_action = await generate_explanation_pair(event, ranking_data)
 
 # Concurrent top-N helper (wall-clock ≈ one LLM round-trip):
 await generate_explanations_for_ranked(ranked_items, top_n=3)
 ```
 
-Events may be SQLAlchemy `Event` models or plain dicts; scores are consumed from
-the `rank_events()` dict shape and are never mutated (asserted in tests).
+Events may be SQLAlchemy `Event` models or plain dicts. Ranking data is read-only:
+the module consumes whatever component scores the engine supplies — both the
+current backend vocabulary (`severity_score`, `blast_radius_score`,
+`anomaly_score`, `recurrence_score`, `priority_score`) and the PRD wording
+(`frequency_score`, `recency_score`, `business_impact_score`, `final_score`) —
+and never computes or writes back any value (asserted in tests).
 
 ## Reliability & the 5-second SLA
 
@@ -125,7 +133,8 @@ the `rank_events()` dict shape and are never mutated (asserted in tests).
 - Hard timeout per request; failures fall back in milliseconds (connection
   refused) or at worst one timeout window (circuit breaker prevents repeats).
 - Measured on the reference MacBook Air (2026): top-2 explanations ≈ **2.9s**
-  wall-clock with `llama3.2:3b`.
+  wall-clock with a warm `llama3.2:3b`. Cold model loads can exceed the
+  timeout — run `ollama run llama3.2:3b "hi"` once before demoing to warm it.
 - If Ollama is entirely absent, the demo still works end-to-end with templates.
 
 ## Running the Gen-AI tests
@@ -145,12 +154,14 @@ ranking-input immutability, dict-shaped events, empty-event safety.
 
 ## Integration notes (for the backend/integration team)
 
-- `explainer.py` intentionally keeps the exact interface already called by
-  `routers/triage.py`: `await generate_explanation(event, item) -> (str, str)`
-  where `item` is a `rank_events()` dict. No router changes are required.
-- To adopt the faster concurrent path, replace the per-item loop with
+- The existing router call `explanation, action = await generate_explanation(event, item)`
+  maps 1:1 onto `generate_explanation_pair(event, item)` — same tuple, same
+  guarantees. Alternatively adopt the contract dict via
+  `await generate_explanation(event, item)`.
+- To use the faster concurrent path, replace the per-item loop with
   `await generate_explanations_for_ranked(ranked_items, top_n=settings.TOP_N_EXPLANATIONS)`
-  then read `item["explanation"] / item["suggested_action"]`.
+  then read `item["explanation"] / item["suggested_action"] /
+  item["explanation_provider"]`.
 - Optional: add the six `OLLAMA_*` / `LLM_COOLDOWN_SECONDS` fields from
   `.env.example` to `backend/app/config.py::Settings` so values flow through the
   existing settings object instead of raw env vars.
