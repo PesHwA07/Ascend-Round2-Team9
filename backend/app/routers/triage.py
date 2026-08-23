@@ -73,11 +73,33 @@ async def execute_triage_pipeline(db: Session, batch_id: Optional[str] = None) -
         rank = item["rank"]
         
         if rank <= top_n:
-            explanation, exp_type, action = await generate_explanation(event, item)
+            exp_dict = await generate_explanation(event, item)
+            if isinstance(exp_dict, dict):
+                summary = exp_dict.get("summary", "")
+                why = exp_dict.get("why_prioritized", "")
+                action = exp_dict.get("recommended_action") or exp_dict.get("suggested_action", "")
+                provider = exp_dict.get("provider", "fallback")
+                exp_type = "ai" if provider in ["ollama", "gemini"] else "template"
+                explanation = f"{summary} {why}".strip() if (summary or why) else exp_dict.get("explanation", "")
+            elif isinstance(exp_dict, (tuple, list)) and len(exp_dict) == 3:
+                explanation, exp_type, action = exp_dict
+                summary = explanation
+                why = ""
+                provider = "ollama" if exp_type == "ai" else "fallback"
+            else:
+                explanation = exp_dict[0] if isinstance(exp_dict, (tuple, list)) else str(exp_dict)
+                action = exp_dict[1] if isinstance(exp_dict, (tuple, list)) and len(exp_dict) > 1 else "Investigate logs."
+                exp_type = "template"
+                summary = explanation
+                why = ""
+                provider = "fallback"
         else:
-            explanation = f"Rank #{rank} priority event on {event.service}. Severity: {event.severity}."
-            exp_type = "template"
+            summary = f"Rank #{rank} priority event on {event.service}."
+            why = f"Ranked #{rank} based on lower severity/score."
+            explanation = f"{summary} {why}"
             action = f"Monitor service '{event.service}' status."
+            provider = "fallback"
+            exp_type = "template"
             
         triage_item = TriageItem(
             snapshot_id=snapshot_id,
@@ -145,6 +167,16 @@ def _build_triage_current_response(
     for item in items:
         event_obj = item.event
         breakdown = item.score_breakdown or {}
+        
+        # Parse explanation text into summary and why_prioritized if combined
+        exp_full = item.explanation or ""
+        summary_val = exp_full
+        why_val = ""
+        if ". " in exp_full:
+            parts = exp_full.split(". ", 1)
+            summary_val = parts[0] + "."
+            why_val = parts[1]
+
         items_response.append(
             TriageItemResponse(
                 id=item.id,
@@ -170,6 +202,10 @@ def _build_triage_current_response(
                 explanation=item.explanation,
                 explanation_type=item.explanation_type or "template",
                 suggested_action=item.suggested_action,
+                summary=summary_val,
+                why_prioritized=why_val,
+                recommended_action=item.suggested_action,
+                provider="ollama" if item.explanation_type == "ai" else "fallback",
                 status=item.status,
                 event=EventResponse.model_validate(event_obj) if event_obj else None
             )

@@ -129,7 +129,14 @@ class TriageItemResponse(BaseModel):
     explanation: str
     explanation_type: str = "template" # 'ai' | 'template'
     suggested_action: str
-    status: str
+    
+    # Structured Gen-AI fields for Frontend EventDetail modal
+    summary: Optional[str] = None
+    why_prioritized: Optional[str] = None
+    recommended_action: Optional[str] = None
+    provider: Optional[str] = "fallback" # 'ollama' | 'gemini' | 'fallback'
+    
+    status: str = "open"
     event: Optional[EventResponse] = None
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
