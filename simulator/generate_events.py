@@ -94,9 +94,9 @@ def generate_infra_event(severity=None, service=None, region=None):
     else:
         value = round(threshold - random.uniform(5, 20), 1)
 
-    # For container restarts, use integer values
+    # For container restarts, use integer values (and never negative)
     if metric_def["metric"] == "container_restarts":
-        value = int(value)
+        value = max(0, int(value))
 
     host = f"node-{region}-{random.randint(1, 5):02d}"
     title = metric_def["title_template"].format(value=value, service=service)
