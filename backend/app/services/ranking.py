@@ -190,3 +190,59 @@ def rank_events(events: List[Event], weights: Dict[str, float]) -> List[Dict[str
         item["rank"] = idx
         
     return scored_items
+
+def adjust_weights(
+    current_weights: Dict[str, float],
+    feedback: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Apply operator feedback to the five ranking weights.
+
+    The returned weights are normalized so their total is 1.0.
+
+    Supported feedback keys:
+        severity_weight
+        frequency_weight
+        recency_weight
+        anomaly_weight
+        business_impact_weight
+    """
+    updated = current_weights.copy()
+
+    mapping = {
+        "severity_weight": "severity",
+        "frequency_weight": "frequency",
+        "recency_weight": "recency",
+        "anomaly_weight": "anomaly",
+        "business_impact_weight": "business_impact",
+    }
+
+    for feedback_key, weight_key in mapping.items():
+        if feedback_key in feedback:
+            try:
+                updated[weight_key] = float(feedback[feedback_key])
+            except (TypeError, ValueError):
+                continue
+
+    # Keep every weight within the valid 0-1 range.
+    updated = {
+        key: max(0.0, min(float(value), 1.0))
+        for key, value in updated.items()
+    }
+
+    total = sum(updated.values())
+
+    # Prevent an invalid all-zero configuration.
+    if total <= 0:
+        return {
+            "severity": 0.30,
+            "frequency": 0.20,
+            "recency": 0.15,
+            "anomaly": 0.20,
+            "business_impact": 0.15,
+        }
+
+    return {
+        key: round(value / total, 4)
+        for key, value in updated.items()
+    }
