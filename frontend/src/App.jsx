@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import Header from './components/Header.jsx'
 import Dashboard from './components/Dashboard.jsx'
+import EventDetail from './components/EventDetail.jsx'
 import './index.css'
 
-// Premium mock dataset matching verified TriageCurrentResponse & TriageItemResponse
+// Premium mock dataset matching verified schemas & the GenAI structured contract
 const MOCK_TRIAGE_DATA = {
   triage_id: "7320b982-f8c6-4b0d-95cf-06f128c7724a",
   snapshot_id: "7320b982-f8c6-4b0d-95cf-06f128c7724a",
@@ -41,7 +42,9 @@ const MOCK_TRIAGE_DATA = {
         metric_name: "memory_usage",
         utilization_pct: 98,
         container_id: "payment-api-pod-8f1",
-        host: "k8s-node-04a"
+        host: "k8s-node-04a",
+        limits: "16GiB",
+        threshold_percentage: 90
       },
       tags: ["infrastructure", "out-of-memory", "kubernetes"],
       score: 0.94,
@@ -54,9 +57,11 @@ const MOCK_TRIAGE_DATA = {
         business_impact: 0.15
       },
       rank: 1,
-      explanation: "Critical Out-Of-Memory hazard on payment-api (Tier-1 path) in US-East. Resource saturation (98% RAM) has triggered automatic failover retries. Anomaly z-score points to 4.2 standard deviations above baseline activity.",
-      explanation_type: "ai",
-      suggested_action: "Restart payment-api containers and provision secondary replica pods.",
+      // GenAI contract fields
+      summary: "Out-Of-Memory (OOM) threat on payment-api: RAM saturation reached 98%.",
+      why_prioritized: "Ranked #1 because payment-api is a Tier-1 critical billing path, and memory utilization breached the 90% threshold by 8% (4.2 standard deviations above baseline).",
+      recommended_action: "Restart payment-api containers on Kubernetes node k8s-node-04a and provision secondary replica pods.",
+      provider: "ollama",
       status: "open"
     },
     {
@@ -71,8 +76,8 @@ const MOCK_TRIAGE_DATA = {
       details: {
         error_type: "HTTP_500_Spike",
         request_count: 1450,
-        error_rate_pct: 12.4,
-        p99_latency_sec: 8.2
+        error_rate_percent: 12.4,
+        p99_latency_seconds: 8.2
       },
       tags: ["application", "gateway-errors", "latency"],
       score: 0.86,
@@ -85,9 +90,11 @@ const MOCK_TRIAGE_DATA = {
         business_impact: 0.12
       },
       rank: 2,
-      explanation: "Gateway error rates breached the 10% threshold in EU-West, resulting in slow client connections (P99 latency 8.2s). Highly correlated with the downstream user-service performance decay.",
-      explanation_type: "ai",
-      suggested_action: "Investigate database connection pools on upstream service routing layers.",
+      // GenAI contract fields
+      summary: "HTTP 500 errors surged on connection gateway, with response latency exceeding 8.2s.",
+      why_prioritized: "Ranked #2 due to a high volume of user traffic impact (1450 requests) and a 12.4% error rate spike, causing gateway timeout cascades.",
+      recommended_action: "Verify load balancer connection pooling limits and check upstream user-service response times.",
+      provider: "ollama",
       status: "open"
     },
     {
@@ -104,7 +111,8 @@ const MOCK_TRIAGE_DATA = {
         version_from: "v2.3.1",
         version_to: "v2.4.0",
         deployed_by: "github-actions-bot",
-        commit_sha: "7d10f2b"
+        commit_sha: "7d10f2b",
+        failure_reason: "Health check endpoint timeout on port 8080"
       },
       tags: ["deployment", "ci-cd", "rollback"],
       score: 0.65,
@@ -117,9 +125,11 @@ const MOCK_TRIAGE_DATA = {
         business_impact: 0.15
       },
       rank: 3,
-      explanation: "Deployment rollout failed on user-service v2.4.0 in US-East, leading to automatic rollback to v2.3.1. Caused by failing integration tests on system routing ports.",
-      explanation_type: "template",
-      suggested_action: "Examine GitHub Action pipeline logs for commit 7d10f2b details.",
+      // GenAI contract fields
+      summary: "CI/CD deployment failed on user-service v2.4.0, triggering automatic rollback to version v2.3.1.",
+      why_prioritized: "Ranked #3 because deployment rollbacks signify direct production stability changes, though customer impact is mitigated by automatic self-healing rollbacks.",
+      recommended_action: "Inspect user-service integration test output in the GitHub Action pipeline logs for commit 7d10f2b.",
+      provider: "fallback",
       status: "open"
     },
     {
@@ -148,16 +158,17 @@ const MOCK_TRIAGE_DATA = {
         business_impact: 0.05
       },
       rank: 4,
-      explanation: "Fluent-bit container was recycled automatically due to system log rotations. No service downtime detected.",
-      explanation_type: "template",
-      suggested_action: "No action required. Normal background self-healing operations.",
+      // GenAI contract fields
+      summary: "fluent-bit logger container restarted automatically on ap-south-node-01 due to log rotation.",
+      why_prioritized: "Ranked #4 as a low-severity event. Regular container recycling does not present system operational or security hazards.",
+      recommended_action: "No action required. Confirm fluent-bit is running in standby mode and indexing logs.",
+      provider: "fallback",
       status: "open"
     }
   ]
 }
 
 function App() {
-  // 1. Prepare states requested in FRONTEND_PRD.md / instructions
   const [activeTab, setActiveTab] = useState('brief')
   const [triageData, setTriageData] = useState(null)
   const [activeWeights, setActiveWeights] = useState({
@@ -172,7 +183,7 @@ function App() {
   const [isReplayMode, setIsReplayMode] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
 
-  // 2. Load mock triage data on mount (simulating fetch trigger latency)
+  // Load mock triage data on mount
   useEffect(() => {
     const timer = setTimeout(() => {
       setTriageData(MOCK_TRIAGE_DATA)
@@ -271,6 +282,14 @@ function App() {
             </div>
           </div>
         </main>
+      )}
+
+      {/* Slide-out Drawer / Bottom sheet Overlay */}
+      {selectedEvent && (
+        <EventDetail 
+          event={selectedEvent} 
+          onClose={() => setSelectedEvent(null)} 
+        />
       )}
     </div>
   )
