@@ -330,7 +330,7 @@ Verifies system latency and SLA:
 *   *Response Fields (Confirmed):*
     *   Returns the full historical `TriageCurrentResponse` matching the selected snapshot UUID.
 *   *Replay Route Alias:*
-    *   *Path:* `GET /api/replay/{snapshot_id}` (Returns same payload).
+    *   *Path:* `GET /api/triage/replay/{snapshot_id}` (Returns same payload).
     *   *Verification:* **NEEDS TEAM CONFIRMATION** with Member 5 on which route path format to hit during production builds.
 
 ### GET `/api/audit-log`
