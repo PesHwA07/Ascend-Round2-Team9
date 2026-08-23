@@ -1,6 +1,6 @@
 import React from 'react'
 
-function Header({ activeTab, setActiveTab, isOnline }) {
+function Header({ activeTab, setActiveTab, connectionStatus }) {
   return (
     <header className="header-nav" aria-label="AuraBrief Navigation Header">
       {/* LEFT: Branding Logo with Glowing Dot */}
@@ -52,14 +52,14 @@ function Header({ activeTab, setActiveTab, isOnline }) {
       <div className="health-status-container">
         <div className="status-badge" aria-label="System status connection badge">
           <span 
-            className={`status-beacon ${isOnline ? 'online' : 'offline'}`}
+            className={`status-beacon ${connectionStatus === 'online' ? 'online' : connectionStatus === 'demo' ? 'warning' : 'offline'}`}
             role="presentation"
           ></span>
           <span 
-            className={`status-text ${isOnline ? 'online' : 'offline'}`} 
+            className={`status-text ${connectionStatus === 'online' ? 'online' : connectionStatus === 'demo' ? 'warning' : 'offline'}`} 
             aria-live="polite"
           >
-            {isOnline ? 'SYSTEM ONLINE' : 'OFFLINE — RETRYING'}
+            {connectionStatus === 'online' ? 'SYSTEM ONLINE' : connectionStatus === 'demo' ? 'DEMO DATA' : 'OFFLINE — RETRYING'}
           </span>
         </div>
       </div>

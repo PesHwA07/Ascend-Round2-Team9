@@ -269,6 +269,16 @@ input:focus-visible {
   color: var(--state-critical);
 }
 
+.status-beacon.warning {
+  background-color: var(--state-warning);
+  box-shadow: 0 0 8px var(--state-warning);
+  animation: pulse-warning 1.5s infinite;
+}
+
+.status-text.warning {
+  color: var(--state-warning);
+}
+
 @keyframes pulse-green {
   0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
   70% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }

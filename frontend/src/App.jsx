@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import Header from './components/Header.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import EventDetail from './components/EventDetail.jsx'
+import { useApi } from './hooks/useApi.js'
 import './index.css'
 
 // Premium mock dataset matching verified schemas & the GenAI structured contract
@@ -179,20 +180,77 @@ function App() {
     business_impact: 0.15
   })
   const [selectedEvent, setSelectedEvent] = useState(null)
-  const [isOnline, setIsOnline] = useState(true)
-  const [isReplayMode, setIsReplayMode] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState('offline') // 'online' | 'offline' | 'demo'
   const [isLoading, setIsLoading] = useState(true)
+  const [isReplayMode, setIsReplayMode] = useState(false)
 
-  // Load mock triage data on mount
+  const api = useApi();
+
+  // Unified data load fetch controller
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // 1. Verify health first
+      const health = await api.getHealth();
+      if (health && health.status === 'ok') {
+        // 2. Fetch live sorted events
+        const data = await api.getCurrentTriage();
+        setTriageData(data);
+        
+        // Sync active weights from backend payload
+        if (data && (data.weights_used || data.weights_applied)) {
+          setActiveWeights(data.weights_used || data.weights_applied);
+        }
+        setConnectionStatus('online');
+      } else {
+        throw new Error('Service reported degraded state');
+      }
+    } catch (err) {
+      console.warn('Backend server unreached. Entering Fallback DEMO MODE:', err.friendlyMsg || err.message);
+      setTriageData(MOCK_TRIAGE_DATA);
+      setActiveWeights(MOCK_TRIAGE_DATA.weights_used);
+      setConnectionStatus('demo');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [api]);
+
+  // Load telemetry data on boot
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setTriageData(MOCK_TRIAGE_DATA)
-      setIsLoading(false)
-    }, 1000)
-    return () => clearTimeout(timer)
-  }, [])
+    loadData();
+  }, []);
 
-  // Event Card selection callback handler
+  // Periodic heartbeat monitor checking API connectivity every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const health = await api.getHealth();
+        if (health && health.status === 'ok') {
+          // Recover connection status
+          setConnectionStatus((prev) => {
+            if (prev !== 'online') {
+              // Re-fetch live telemetry when recovering
+              api.getCurrentTriage().then(setTriageData);
+            }
+            return 'online';
+          });
+        } else {
+          setConnectionStatus((prev) => prev === 'online' ? 'offline' : prev);
+        }
+      } catch (err) {
+        setConnectionStatus((prev) => {
+          // If we were online, show OFFLINE - RETRYING
+          if (prev === 'online') return 'offline';
+          // If we were already in local demo mode, stay in DEMO DATA
+          return prev === 'demo' ? 'demo' : 'offline';
+        });
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [api]);
+
+  // Event selection callback handler
   const handleSelectEvent = (event) => {
     setSelectedEvent(event)
     console.log('Selected Event for detailed brief inspection:', event)
@@ -201,12 +259,39 @@ function App() {
   // Triage replay exit handler
   const handleExitReplay = () => {
     setIsReplayMode(false)
-    setIsLoading(true)
-    setTimeout(() => {
-      setTriageData(MOCK_TRIAGE_DATA)
-      setIsLoading(false)
-    }, 500)
+    loadData();
   }
+
+  // Expose feedback updates handler (used by FeedbackPanel in future steps)
+  const handleUpdateWeights = async (newWeights) => {
+    setIsLoading(true);
+    try {
+      if (connectionStatus === 'online') {
+        const response = await api.postFeedback(newWeights);
+        if (response && response.triage) {
+          setTriageData(response.triage);
+          setActiveWeights(newWeights);
+        }
+      } else {
+        // Fallback weights updates simulator in DEMO MODE
+        console.log('Feedback weights submitted in local DEMO MODE:', newWeights);
+        setActiveWeights(newWeights);
+        setTriageData((prev) => ({
+          ...prev,
+          weights_used: newWeights,
+          weights_applied: newWeights,
+          ranked_events: prev.ranked_events.map(e => ({
+            ...e,
+            score: (newWeights.severity * 0.3) + (newWeights.frequency * 0.2) + (newWeights.recency * 0.15) + (newWeights.anomaly * 0.2) + (newWeights.business_impact * 0.15)
+          })).sort((a, b) => b.score - a.score)
+        }));
+      }
+    } catch (err) {
+      console.error('Failed to submit active scoring weights:', err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -217,7 +302,7 @@ function App() {
       <Header 
         activeTab={activeTab} 
         setActiveTab={setActiveTab} 
-        isOnline={isOnline} 
+        connectionStatus={connectionStatus} 
       />
 
       {/* Primary Panels Switcher Router */}
@@ -226,7 +311,7 @@ function App() {
           triageData={triageData}
           onSelectEvent={handleSelectEvent}
           isLoading={isLoading}
-          isOnline={isOnline}
+          isOnline={connectionStatus === 'online'}
           isReplayMode={isReplayMode}
           onExitReplay={handleExitReplay}
         />
@@ -252,7 +337,7 @@ function App() {
             </div>
             <div className="terminal-line">
               <span className="terminal-prompt">&gt;</span>
-              <span>replay components: <span className="terminal-value-info">DISCONNECTED (Step 3)</span></span>
+              <span>replay components: <span className="terminal-value-info">DISCONNECTED (Step 5)</span></span>
             </div>
           </div>
         </main>

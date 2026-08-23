@@ -16,17 +16,37 @@ function EventDetail({ event, onClose }) {
     timestamp,
     score = 0,
     priority_score = 0,
-    // Gen-AI structured explanation fields
-    summary = '',
-    why_prioritized = '',
-    recommended_action = '',
-    provider = 'fallback',
-    // Fallbacks if backend flattens them
+    // Details payload
+    details = {},
+    // Structured vs Flat fields:
     explanation = '',
     suggested_action = '',
     explanation_type = 'template',
-    details = {}
+    summary = '',
+    why_prioritized = '',
+    recommended_action = '',
+    provider = 'fallback'
   } = event
+
+  // Parse structured explanation contract dynamically
+  let whatHappened = ''
+  let whyPrioritizedText = ''
+  let actionRequired = ''
+  let modelProvider = ''
+
+  if (typeof explanation === 'object' && explanation !== null) {
+    // Structured format: event.explanation.summary etc.
+    whatHappened = explanation.summary || summary || ''
+    whyPrioritizedText = explanation.why_prioritized || why_prioritized || ''
+    actionRequired = explanation.recommended_action || recommended_action || suggested_action || ''
+    modelProvider = explanation.provider || provider || explanation_type || ''
+  } else {
+    // Flattened format: event.explanation (string), event.suggested_action (string)
+    whatHappened = explanation || summary || 'No summary text generated.'
+    whyPrioritizedText = why_prioritized || ''
+    actionRequired = suggested_action || recommended_action || 'Review event logs and confirm system state.'
+    modelProvider = explanation_type || provider || ''
+  }
 
   // Format score as percentage
   const displayScore = Math.round((score || priority_score) * 100)
@@ -41,7 +61,7 @@ function EventDetail({ event, onClose }) {
 
   // AI Provider description
   const getProviderName = () => {
-    const p = provider || explanation_type
+    const p = String(modelProvider).toLowerCase()
     if (p === 'ollama' || p === 'ai') return 'Ollama Llama3.2'
     if (p === 'gemini') return 'Google Gemini API'
     return 'Rules Fallback Engine'
@@ -156,15 +176,15 @@ function EventDetail({ event, onClose }) {
             <div className="ai-brief-section">
               <h4 className="brief-section-title">What Happened</h4>
               <p className="brief-section-body">
-                {summary || explanation || 'No summary text generated.'}
+                {whatHappened}
               </p>
             </div>
 
-            {why_prioritized && (
+            {whyPrioritizedText && (
               <div className="ai-brief-section">
                 <h4 className="brief-section-title">Why This Was Prioritized</h4>
                 <p className="brief-section-body">
-                  {why_prioritized}
+                  {whyPrioritizedText}
                 </p>
               </div>
             )}
@@ -172,7 +192,7 @@ function EventDetail({ event, onClose }) {
             <div className="ai-brief-section action-emphasized">
               <h4 className="brief-section-title">Recommended Action</h4>
               <p className="brief-section-body">
-                {recommended_action || suggested_action || 'Review event logs and confirm system state.'}
+                {actionRequired}
               </p>
             </div>
           </div>
