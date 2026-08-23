@@ -109,11 +109,13 @@ def generate_infra_event(severity=None, service=None, region=None):
         title=title,
         details={
             "metric": metric_def["metric"],
-            "current_value": value,
+            "metric_value": value,
             "threshold": threshold,
             "unit": metric_def["unit"],
             "host": host,
             "duration_seconds": random.choice([60, 120, 300, 600]),
+            # M5's ranking engine reads "container_restarts" for anomaly scoring
+            **({"container_restarts": value} if metric_def["metric"] == "container_restarts" else {}),
         },
         tags=metric_def["tags"],
     )
