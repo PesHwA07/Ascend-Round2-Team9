@@ -1,1 +1,2 @@
-# AuraBrief 95 backend app package
+"""AuraBrief 95 Backend Package"""
+__version__ = "1.0.0"

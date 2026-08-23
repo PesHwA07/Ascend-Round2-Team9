@@ -1,23 +1,33 @@
-# Dependencies
-node_modules/
+# Python
 __pycache__/
-*.pyc
-.venv/
-
-# Data (local SQLite)
-data/*.db
-
-# Environment
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
 .env
 
-# IDE
-.vscode/
-.idea/
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
 
-# OS
-.DS_Store
-Thumbs.db
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3
 
-# Build artifacts
+# Node / Frontend
+node_modules/
 dist/
-build/
+.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
